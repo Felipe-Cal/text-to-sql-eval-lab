@@ -96,27 +96,106 @@ Four strategies are available, controlling what gets prepended to the prompt bef
 
 ## Running evaluations
 
+All commands below use **15** golden questions unless you pass `--difficulty` (easy = 5, medium = 5, hard = 5). Logs are written to **`./logs/`**.
+
+### Quick start (single run)
+
 ```bash
-# Default model (gpt-4o-mini), zero_shot strategy, all 15 questions
+# Default: openai/gpt-4o-mini, zero_shot, all difficulties
 python scripts/run_eval.py
+```
 
-# Specific model
-python scripts/run_eval.py --model anthropic/claude-haiku-4-5
+### One model, all strategies (full strategy sweep)
 
-# Filter by difficulty
-python scripts/run_eval.py --model openai/gpt-4o --difficulty hard
+Runs four strategies back-to-back and prints one summary table.
 
-# Compare multiple models side by side
-python scripts/run_eval.py --models openai/gpt-4o-mini anthropic/claude-haiku-4-5
-
-# Run a specific prompt strategy
-python scripts/run_eval.py --strategy few_shot_dynamic
-
-# Compare all strategies side by side
+```bash
 python scripts/run_eval.py --strategies zero_shot few_shot_static few_shot_dynamic chain_of_thought
 ```
 
+### Full benchmark: models × strategies (matrix)
+
+Runs every combination (e.g. 2 models × 4 strategies = **8** eval runs). Expect on the order of **~30–45 minutes** depending on API latency and models.
+
+```bash
+python scripts/run_eval.py \
+  --models openai/gpt-4o-mini anthropic/claude-haiku-4-5 \
+  --strategies zero_shot few_shot_static few_shot_dynamic chain_of_thought
+```
+
+Use fewer models or strategies if you want a shorter run:
+
+```bash
+# Two models, three strategies (no chain-of-thought) — ~6 runs
+python scripts/run_eval.py \
+  --models openai/gpt-4o-mini anthropic/claude-haiku-4-5 \
+  --strategies zero_shot few_shot_static few_shot_dynamic
+```
+
+### Other useful options
+
+```bash
+# Single model and strategy
+python scripts/run_eval.py --model anthropic/claude-haiku-4-5 --strategy few_shot_dynamic
+
+# Only hard questions (q11–q15)
+python scripts/run_eval.py --model openai/gpt-4o-mini --difficulty hard
+
+# Compare models only (default strategy: zero_shot)
+python scripts/run_eval.py --models openai/gpt-4o-mini anthropic/claude-haiku-4-5
+```
+
+### Inspect AI CLI (advanced)
+
+Equivalent to what `run_eval.py` wraps, with full Inspect flags:
+
+```bash
+inspect eval src/evals/tasks.py --model openai/gpt-4o-mini
+```
+
 Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works — pass the `provider/model-name` string. The judge model is controlled separately via `JUDGE_MODEL` and can be set to a stronger model (e.g. `openai/gpt-4o`) for stricter evaluation without changing the model under test.
+
+### Guardrails and tests (pytest)
+
+Implementation lives under [`src/guardrails/`](src/guardrails/): deterministic checks with **no extra LLM calls**. Call `check_input` before the LLM and `check_output` on generated SQL before execution when you wire a production path; this repo ships the **library plus tests** so behavior stays regression-tested. Run the full suite with:
+
+```bash
+pytest
+```
+
+#### Input guardrails ([`src/guardrails/input.py`](src/guardrails/input.py))
+
+Run **before** the model sees the question (`check_input`). Two independent checks; the first failure wins:
+
+| Check | What it blocks |
+|--------|----------------|
+| **SQL injection** | Raw SQL fragments in the user string: DDL/DML keywords, comment tricks (`--`, `/* */`), `UNION` injection, stacked `;` queries, etc. |
+| **Prompt injection** | Phrases that try to override instructions (“ignore the above”, “new instructions”, jailbreak-style patterns). |
+
+Tests in [`tests/test_input_guardrails.py`](tests/test_input_guardrails.py) cover legitimate golden-style questions (must pass), injection strings (must fail), and edge cases (empty input, mixed case).
+
+#### Output guardrails ([`src/guardrails/output.py`](src/guardrails/output.py))
+
+Run **after** the model returns SQL, **before** execution (`check_output`):
+
+| Check | What it does |
+|--------|----------------|
+| **SELECT-only** | Uses **sqlglot AST**: root statement must be read-only; blocks DDL (e.g. `DROP`, `CREATE`) and DML (`INSERT`, `UPDATE`, `DELETE`). |
+| **Schema scope** | Every referenced table must be in the allowlist (`customers`, `products`, `orders`, `order_items` by default). Stops queries against arbitrary tables (e.g. catalog tables). |
+
+Tests in [`tests/test_output_guardrails.py`](tests/test_output_guardrails.py) cover valid `SELECT`s (including joins, CTEs, trailing `;`), and ensure DDL/DML / unknown tables are rejected.
+
+#### Adversarial tests ([`tests/test_guardrails_adversarial.py`](tests/test_guardrails_adversarial.py))
+
+Goes beyond happy paths: **evasion attempts** (obfuscated keywords, leetspeak, Unicode lookalikes, prompt-injection phrasing). Some cases are marked **`xfail`** — they document **known gaps** of regex/keyword input filtering (not silent failures). The file’s docstring explains the finding: **output** guardrails (AST-based) are harder to evade than **input** (regex-based); **defense in depth** means input bypasses may still be caught at output.
+
+Run one file:
+
+```bash
+pytest tests/test_input_guardrails.py -v
+pytest tests/test_output_guardrails.py -v
+pytest tests/test_guardrails_adversarial.py -v
+```
 
 ## Experimental findings
 
@@ -141,11 +220,16 @@ Full run: `openai/gpt-4o-mini`, 15 questions, all strategies.
 
 > **Tip:** cases where `result_match = 0` but `semantic_judge = 1` are false negatives in the deterministic scorer — the model was semantically correct but returned rows in a different format. Cases where `result_match > semantic_judge` indicate potential judge calibration issues worth investigating.
 
-Logs are saved to `./logs/`. Explore them with:
+Logs are saved to `./logs/`. Explore them in the browser:
 
 ```bash
-inspect view
+# Recommended (uses your active Python; works well with Conda)
+python -m inspect_ai view start --log-dir ./logs
 ```
+
+If `inspect view` alone shows empty rows or SSL errors, your shell may be picking a different `inspect` binary — use the command above or pass `--log-dir ./logs` explicitly.
+
+Open the URL printed in the terminal (default [http://127.0.0.1:7575](http://127.0.0.1:7575)).
 
 ## Project structure
 
@@ -157,7 +241,11 @@ text-to-sql-eval-lab/
 │       └── questions.json           # 15 golden Q&A pairs
 ├── scripts/
 │   └── run_eval.py                  # CLI entrypoint — supports --model(s), --strategy/strategies, --difficulty
+├── tests/                           # pytest — input/output/adversarial guardrails
 ├── src/
+│   ├── guardrails/
+│   │   ├── input.py                 # pre-LLM: SQL + prompt injection checks
+│   │   └── output.py                # post-LLM: SELECT-only + schema allowlist (AST)
 │   ├── agent/
 │   │   ├── agent.py                 # LLM call, prompt strategies, SQL extraction (Langfuse traced)
 │   │   └── few_shot.py              # Static and dynamic (embedding-based) example selection
