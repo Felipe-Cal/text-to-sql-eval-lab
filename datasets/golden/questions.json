@@ -1,0 +1,166 @@
+[
+  {
+    "id": "q01",
+    "difficulty": "easy",
+    "question": "How many customers are there in total?",
+    "sql": "SELECT COUNT(*) AS total_customers FROM customers",
+    "expected_rows": [[10]],
+    "notes": "Simple COUNT, no joins."
+  },
+  {
+    "id": "q02",
+    "difficulty": "easy",
+    "question": "List all product categories.",
+    "sql": "SELECT DISTINCT category FROM products ORDER BY category",
+    "expected_rows": [["Electronics"], ["Furniture"], ["Stationery"]],
+    "notes": "DISTINCT on a single column."
+  },
+  {
+    "id": "q03",
+    "difficulty": "easy",
+    "question": "What is the most expensive product?",
+    "sql": "SELECT name, price FROM products ORDER BY price DESC LIMIT 1",
+    "expected_rows": [["Standing Desk", 499.99]],
+    "notes": "ORDER BY + LIMIT. Price returned as Decimal, scorer normalizes."
+  },
+  {
+    "id": "q04",
+    "difficulty": "easy",
+    "question": "How many orders have the status 'cancelled'?",
+    "sql": "SELECT COUNT(*) AS cancelled_orders FROM orders WHERE status = 'cancelled'",
+    "expected_rows": [[2]],
+    "notes": "Simple filter."
+  },
+  {
+    "id": "q05",
+    "difficulty": "easy",
+    "question": "Which customers are from the USA?",
+    "sql": "SELECT name FROM customers WHERE country = 'USA' ORDER BY name",
+    "expected_rows": [["Alice Martin"], ["Grace Kim"], ["James Wilson"]],
+    "notes": "Filter + sort."
+  },
+  {
+    "id": "q06",
+    "difficulty": "medium",
+    "question": "What is the total revenue from completed orders?",
+    "sql": "SELECT ROUND(SUM(oi.quantity * oi.unit_price), 2) AS total_revenue FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.status = 'completed'",
+    "expected_rows": [[1439.74]],
+    "notes": "Aggregation with JOIN and filter."
+  },
+  {
+    "id": "q07",
+    "difficulty": "medium",
+    "question": "How many orders did each customer place? Show customer name and order count, sorted by order count descending then name.",
+    "sql": "SELECT c.name, COUNT(o.id) AS order_count FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.name ORDER BY order_count DESC, c.name",
+    "expected_rows": [
+      ["Alice Martin", 3],
+      ["Bob Schmidt", 2],
+      ["Clara Sousa", 2],
+      ["Grace Kim", 2],
+      ["David Chen", 1],
+      ["Eva Rossi", 1],
+      ["Frank Müller", 1],
+      ["Hugo Dubois", 1],
+      ["Iris Patel", 1],
+      ["James Wilson", 1]
+    ],
+    "notes": "JOIN + GROUP BY + ORDER BY. Tiebreaker by name for determinism."
+  },
+  {
+    "id": "q08",
+    "difficulty": "medium",
+    "question": "What is the average order value for completed orders?",
+    "sql": "SELECT ROUND(AVG(order_total), 2) AS avg_order_value FROM (SELECT o.id, SUM(oi.quantity * oi.unit_price) AS order_total FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY o.id) sub",
+    "expected_rows": [[130.89]],
+    "notes": "Subquery with aggregation."
+  },
+  {
+    "id": "q09",
+    "difficulty": "medium",
+    "question": "Which product category generates the most revenue from completed orders?",
+    "sql": "SELECT p.category, ROUND(SUM(oi.quantity * oi.unit_price), 2) AS revenue FROM order_items oi JOIN products p ON p.id = oi.product_id JOIN orders o ON o.id = oi.order_id WHERE o.status = 'completed' GROUP BY p.category ORDER BY revenue DESC LIMIT 1",
+    "expected_rows": [["Electronics", 959.88]],
+    "notes": "Multi-table JOIN with aggregation."
+  },
+  {
+    "id": "q10",
+    "difficulty": "medium",
+    "question": "List customers who signed up in 2024, showing their name and signup date.",
+    "sql": "SELECT name, CAST(signup_date AS VARCHAR) FROM customers WHERE YEAR(signup_date) = 2024 ORDER BY signup_date",
+    "expected_rows": [
+      ["Frank Müller", "2024-01-02"],
+      ["Grace Kim", "2024-02-14"],
+      ["Hugo Dubois", "2024-03-30"],
+      ["Iris Patel", "2024-05-05"],
+      ["James Wilson", "2024-08-20"]
+    ],
+    "notes": "Date filtering using YEAR(). Cast to VARCHAR for consistent comparison."
+  },
+  {
+    "id": "q11",
+    "difficulty": "hard",
+    "question": "Who are the top 3 customers by total spend on completed orders?",
+    "sql": "SELECT c.name, ROUND(SUM(oi.quantity * oi.unit_price), 2) AS total_spend FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY c.name ORDER BY total_spend DESC LIMIT 3",
+    "expected_rows": [
+      ["Alice Martin", 599.92],
+      ["Bob Schmidt", 384.92],
+      ["David Chen", 114.98]
+    ],
+    "notes": "Three-table JOIN with aggregation and ranking."
+  },
+  {
+    "id": "q12",
+    "difficulty": "hard",
+    "question": "Which customers have never placed a completed order?",
+    "sql": "SELECT name FROM customers WHERE id NOT IN (SELECT DISTINCT customer_id FROM orders WHERE status = 'completed') ORDER BY name",
+    "expected_rows": [["Eva Rossi"], ["Hugo Dubois"], ["James Wilson"]],
+    "notes": "NOT IN subquery — classic anti-join pattern."
+  },
+  {
+    "id": "q13",
+    "difficulty": "hard",
+    "question": "What is the month-by-month revenue for 2024 from completed orders?",
+    "sql": "SELECT MONTH(o.order_date) AS month, ROUND(SUM(oi.quantity * oi.unit_price), 2) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.status = 'completed' AND YEAR(o.order_date) = 2024 GROUP BY MONTH(o.order_date) ORDER BY month",
+    "expected_rows": [
+      [1, 419.97],
+      [2, 129.95],
+      [3, 114.98],
+      [4, 174.92],
+      [5, 49.99],
+      [6, 79.99],
+      [7, 349.99],
+      [9, 69.98],
+      [10, 49.97]
+    ],
+    "notes": "Time-series aggregation by month. August has no completed orders."
+  },
+  {
+    "id": "q14",
+    "difficulty": "hard",
+    "question": "For each country, what is the number of customers and the total number of completed orders they placed? Sort by completed orders descending, then country.",
+    "sql": "SELECT c.country, COUNT(DISTINCT c.id) AS customer_count, COUNT(o.id) AS completed_orders FROM customers c LEFT JOIN orders o ON o.customer_id = c.id AND o.status = 'completed' GROUP BY c.country ORDER BY completed_orders DESC, c.country",
+    "expected_rows": [
+      ["USA", 3, 5],
+      ["Germany", 2, 3],
+      ["Brazil", 1, 1],
+      ["Canada", 1, 1],
+      ["India", 1, 1],
+      ["France", 1, 0],
+      ["Italy", 1, 0]
+    ],
+    "notes": "LEFT JOIN to include countries with 0 completed orders. Tiebreaker by country."
+  },
+  {
+    "id": "q15",
+    "difficulty": "hard",
+    "question": "Which customers placed more than one order and what is their average order value? Sort by order count descending, then name.",
+    "sql": "SELECT c.name, COUNT(o.id) AS order_count, ROUND(AVG(order_total), 2) AS avg_order_value FROM customers c JOIN orders o ON o.customer_id = c.id JOIN (SELECT order_id, SUM(quantity * unit_price) AS order_total FROM order_items GROUP BY order_id) ot ON ot.order_id = o.id GROUP BY c.name HAVING COUNT(o.id) > 1 ORDER BY order_count DESC, c.name",
+    "expected_rows": [
+      ["Alice Martin", 3, 199.97],
+      ["Bob Schmidt", 2, 192.46],
+      ["Clara Sousa", 2, 284.99],
+      ["Grace Kim", 2, 49.98]
+    ],
+    "notes": "HAVING clause + subquery for order totals. Tiebreaker by name."
+  }
+]
