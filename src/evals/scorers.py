@@ -210,8 +210,18 @@ You will be given:
 - The generated SQL and its execution result (or an error message)
 - The reference expected result rows
 
-Focus on whether the data returned correctly answers the question.
-Ignore stylistic differences (aliases, join order, formatting).
+Grounding rules — read carefully:
+1. Evaluate ONLY based on the data shown to you. Do not use world knowledge to
+   infer what rows "should" exist (e.g. do not assume a month-by-month table
+   must have 12 rows if the reference result does not).
+2. Treat different representations of the same value as equivalent:
+   - Dates: "2024-03-05", datetime.date(2024, 3, 5), and "2024-03-05T00:00:00"
+     are all the same date.
+   - Floats: 1439.74 and 1439.7400 are the same number.
+   - Column aliases: "category" and "p.category" refer to the same data.
+3. Row order does not matter unless the question explicitly asks for ordering.
+4. Focus on whether the VALUES in the result correctly answer the question,
+   not on SQL style, alias names, or formatting differences.
 
 Output ONLY valid JSON in exactly this format:
 {
@@ -270,17 +280,19 @@ def semantic_judge(judge_model: str | None = None) -> Scorer:
 
         question = state.input_text
 
-        # Execute generated SQL to get actual rows for the judge to inspect
+        # Execute generated SQL to get actual rows for the judge to inspect.
+        # Normalize before serializing so the judge sees clean values — not
+        # Python datetime/Decimal reprs — which previously caused false partials.
         try:
             actual_rows = execute_query(generated_sql)
-            # Cap at 10 rows so we don't blow up the context window
-            generated_result_str = str(actual_rows[:10])
-            if len(actual_rows) > 10:
-                generated_result_str += f"  ... ({len(actual_rows)} rows total)"
+            normalized = _normalize_rows(actual_rows)
+            generated_result_str = str(normalized[:10])
+            if len(normalized) > 10:
+                generated_result_str += f"  ... ({len(normalized)} rows total)"
         except Exception as e:
             generated_result_str = f"ERROR: {e}"
 
-        # Parse expected rows for display
+        # Parse expected rows for display (already plain JSON values)
         try:
             expected_rows = json.loads(target.text)
             expected_result_str = str(expected_rows[:10])
