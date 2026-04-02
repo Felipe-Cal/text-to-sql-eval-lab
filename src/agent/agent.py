@@ -7,10 +7,11 @@ Uses LiteLLM so you can swap models via the DEFAULT_MODEL env var.
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import litellm
 from dotenv import load_dotenv
+from langfuse import get_client, observe
 
 from src.utils.db import get_schema_string
 
@@ -42,6 +43,7 @@ class AgentResult:
     model: str
     prompt_tokens: int
     completion_tokens: int
+    trace_id: str | None = field(default=None)
 
 
 def extract_sql(raw: str) -> str:
@@ -52,6 +54,7 @@ def extract_sql(raw: str) -> str:
     return raw.strip()
 
 
+@observe(name="text-to-sql")
 def generate_sql(
     question: str,
     model: str | None = None,
@@ -87,12 +90,25 @@ def generate_sql(
     raw_sql = response.choices[0].message.content or ""
     sql = extract_sql(raw_sql)
 
+    lf = get_client()
+    lf.update_current_span(
+        input=question,
+        output=sql,
+        metadata={
+            "model": model,
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+        },
+    )
+    trace_id = lf.get_current_trace_id()
+
     return AgentResult(
         question=question,
         sql=sql,
         model=model,
         prompt_tokens=response.usage.prompt_tokens,
         completion_tokens=response.usage.completion_tokens,
+        trace_id=trace_id,
     )
 
 

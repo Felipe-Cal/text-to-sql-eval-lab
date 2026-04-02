@@ -89,6 +89,7 @@ def text_to_sql_solver(model: str | None = None) -> Solver:
         state.metadata["model"] = result.model
         state.metadata["prompt_tokens"] = result.prompt_tokens
         state.metadata["completion_tokens"] = result.completion_tokens
+        state.metadata["langfuse_trace_id"] = result.trace_id
 
         return state
 

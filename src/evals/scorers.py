@@ -20,8 +20,20 @@ from decimal import Decimal
 import sqlglot
 from inspect_ai.scorer import Score, Scorer, Target, accuracy, scorer
 from inspect_ai.solver import TaskState
+from langfuse import get_client
 
 from src.utils.db import execute_query
+
+
+def _push_langfuse_score(state: TaskState, name: str, value: float) -> None:
+    """Push a score to Langfuse if a trace_id is available. Silently skips if not configured."""
+    trace_id = state.metadata.get("langfuse_trace_id")
+    if not trace_id:
+        return
+    try:
+        get_client().create_score(trace_id=trace_id, name=name, value=value)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +89,12 @@ def syntax_valid() -> Scorer:
         try:
             parsed = sqlglot.parse(sql, dialect="duckdb")
             if not parsed or parsed[0] is None:
+                _push_langfuse_score(state, "syntax_valid", 0)
                 return Score(value=0, explanation="sqlglot returned no parse tree.")
+            _push_langfuse_score(state, "syntax_valid", 1)
             return Score(value=1, explanation=f"Valid SQL: {sql}")
         except sqlglot.errors.ParseError as e:
+            _push_langfuse_score(state, "syntax_valid", 0)
             return Score(value=0, explanation=f"Parse error: {e}")
 
     return score
@@ -102,8 +117,10 @@ def execution_ok() -> Scorer:
 
         try:
             execute_query(sql)
+            _push_langfuse_score(state, "execution_ok", 1)
             return Score(value=1, explanation="SQL executed successfully.")
         except Exception as e:
+            _push_langfuse_score(state, "execution_ok", 0)
             return Score(value=0, explanation=f"Execution error: {e}")
 
     return score
@@ -144,6 +161,7 @@ def result_match() -> Scorer:
 
         # Compare results
         if _rows_match(actual_rows, expected_tuples, ordered=False):
+            _push_langfuse_score(state, "result_match", 1)
             return Score(
                 value=1,
                 explanation=f"Result matches. Got {len(actual_rows)} rows.",
@@ -155,6 +173,7 @@ def result_match() -> Scorer:
             and actual_rows
             and len(actual_rows[0]) == len(expected_tuples[0])
         ):
+            _push_langfuse_score(state, "result_match", 0.5)
             return Score(
                 value=0.5,
                 explanation=(
@@ -163,6 +182,7 @@ def result_match() -> Scorer:
                 ),
             )
 
+        _push_langfuse_score(state, "result_match", 0)
         return Score(
             value=0,
             explanation=(

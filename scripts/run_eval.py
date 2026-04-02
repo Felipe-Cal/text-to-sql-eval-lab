@@ -43,7 +43,7 @@ def run(models: list[str], difficulty: str | None) -> None:
         logs = inspect_eval(
             text_to_sql(model=model, difficulty=difficulty),
             model=model,
-            log_dir="./results",
+            log_dir="./logs",
         )
 
         log = logs[0]
@@ -76,7 +76,7 @@ def run(models: list[str], difficulty: str | None) -> None:
     console.print(table)
     console.print()
     console.print(
-        "[dim]Full logs saved to ./results — run [bold]inspect view[/bold] to explore them.[/dim]"
+        "[dim]Full logs saved to ./logs — run [bold]inspect view[/bold] to explore them.[/dim]"
     )
 
 

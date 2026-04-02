@@ -26,7 +26,7 @@ Natural language question + schema
    - `execution_ok` — runs the query against the real DuckDB database; checks it doesn't error.
    - `result_match` — executes the query and compares the returned rows to the golden expected rows (1.0 = exact match, 0.5 = right shape but wrong values, 0.0 = wrong).
 
-The eval harness is [Inspect AI](https://inspect.ai), which handles parallelism, logging, and the `inspect view` log explorer.
+The eval harness is [Inspect AI](https://inspect.aisi.org.uk/), which handles parallelism, logging, and the `inspect view` log explorer.
 
 ## Dataset
 
@@ -104,7 +104,7 @@ Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works �
 └───────────────────┴──────────────────────┴─────────────────────┴──────────────────────┘
 ```
 
-Logs are saved to `./results/`. Explore them with:
+Logs are saved to `./logs/`. Explore them with:
 
 ```bash
 inspect view
