@@ -1,22 +1,25 @@
 """
 Scorers for text-to-SQL evaluation.
 
-Three scorers, increasing in strictness:
+Four scorers, increasing in sophistication:
 
   1. syntax_valid    — does the SQL parse without error? (sqlglot)
   2. execution_ok    — does the SQL execute against the real database?
   3. result_match    — do the result rows match the golden expected rows?
+  4. semantic_judge  — does an LLM judge agree the SQL answers the question correctly?
 
 Each scorer follows the Inspect AI scorer interface:
   score(state, target) -> Score
 """
 
 import json
+import os
 from typing import Any
 
 import datetime
 from decimal import Decimal
 
+import litellm
 import sqlglot
 from inspect_ai.scorer import Score, Scorer, Target, accuracy, scorer
 from inspect_ai.solver import TaskState
@@ -189,6 +192,139 @@ def result_match() -> Scorer:
                 f"Result mismatch. Got {len(actual_rows)} rows, expected {len(expected_tuples)}.\n"
                 f"Actual:   {actual_rows[:3]}\nExpected: {expected_tuples[:3]}"
             ),
+        )
+
+    return score
+
+
+# ---------------------------------------------------------------------------
+# Scorer 4: LLM-as-judge semantic correctness
+# ---------------------------------------------------------------------------
+
+JUDGE_SYSTEM_PROMPT = """\
+You are an expert SQL evaluator. Your job is to assess whether a generated SQL \
+query correctly answers a natural language question.
+
+You will be given:
+- The natural language question
+- The generated SQL and its execution result (or an error message)
+- The reference expected result rows
+
+Focus on whether the data returned correctly answers the question.
+Ignore stylistic differences (aliases, join order, formatting).
+
+Output ONLY valid JSON in exactly this format:
+{
+  "verdict": "correct" | "partial" | "incorrect",
+  "reasoning": "<one or two sentences explaining your judgment>"
+}
+
+Verdicts:
+- "correct"   — the query returns data that fully and correctly answers the question
+- "partial"   — the query runs but returns incomplete or slightly wrong data
+                (wrong aggregation level, missing a filter, off-by-one, etc.)
+- "incorrect" — the query fails to execute, returns completely wrong data,
+                or doesn't address the question at all\
+"""
+
+JUDGE_USER_TEMPLATE = """\
+Question: {question}
+
+Generated SQL:
+{generated_sql}
+
+Generated SQL result:
+{generated_result}
+
+Reference expected result:
+{expected_result}
+
+Does the generated SQL correctly answer the question? Reply with JSON only.\
+"""
+
+
+@scorer(metrics=[accuracy()])
+def semantic_judge(judge_model: str | None = None) -> Scorer:
+    """
+    Uses an LLM as a judge to evaluate whether the generated SQL semantically
+    answers the question correctly — even when the exact rows don't match.
+
+    This catches cases that fool result_match, such as:
+    - Different column aliases returning the same data
+    - Equivalent SQL written differently (e.g. IN vs JOIN)
+    - Float precision edge cases
+
+    The judge sees: the question, generated SQL, its result, and the expected
+    result. It outputs a structured verdict: correct / partial / incorrect.
+
+    Args:
+        judge_model: LiteLLM model string for the judge.
+                     Defaults to JUDGE_MODEL env var, then "openai/gpt-4o-mini".
+    """
+    _judge_model = judge_model or os.getenv("JUDGE_MODEL", "openai/gpt-4o-mini")
+
+    async def score(state: TaskState, target: Target) -> Score:
+        generated_sql = state.output.completion.strip()
+        if not generated_sql:
+            return Score(value=0, explanation="Empty SQL output — nothing to judge.")
+
+        question = state.input_text
+
+        # Execute generated SQL to get actual rows for the judge to inspect
+        try:
+            actual_rows = execute_query(generated_sql)
+            # Cap at 10 rows so we don't blow up the context window
+            generated_result_str = str(actual_rows[:10])
+            if len(actual_rows) > 10:
+                generated_result_str += f"  ... ({len(actual_rows)} rows total)"
+        except Exception as e:
+            generated_result_str = f"ERROR: {e}"
+
+        # Parse expected rows for display
+        try:
+            expected_rows = json.loads(target.text)
+            expected_result_str = str(expected_rows[:10])
+            if len(expected_rows) > 10:
+                expected_result_str += f"  ... ({len(expected_rows)} rows total)"
+        except Exception:
+            expected_result_str = target.text[:500]
+
+        # Build the judge prompt
+        user_content = JUDGE_USER_TEMPLATE.format(
+            question=question,
+            generated_sql=generated_sql,
+            generated_result=generated_result_str,
+            expected_result=expected_result_str,
+        )
+
+        # Call the judge LLM
+        try:
+            response = litellm.completion(
+                model=_judge_model,
+                messages=[
+                    {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0,
+                max_tokens=256,
+                response_format={"type": "json_object"},
+            )
+            raw = response.choices[0].message.content or ""
+            verdict_data = json.loads(raw)
+        except Exception as e:
+            return Score(value=0, explanation=f"Judge call failed: {e}")
+
+        verdict = verdict_data.get("verdict", "incorrect").lower().strip()
+        reasoning = verdict_data.get("reasoning", "No reasoning provided.")
+
+        score_map = {"correct": 1.0, "partial": 0.5, "incorrect": 0.0}
+        score_value = score_map.get(verdict, 0.0)
+
+        _push_langfuse_score(state, "semantic_judge", score_value)
+
+        return Score(
+            value=score_value,
+            explanation=f"[{verdict.upper()}] {reasoning}",
         )
 
     return score

@@ -21,7 +21,7 @@ from inspect_ai.scorer import mean
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
 from src.agent.agent import extract_sql, generate_sql
-from src.evals.scorers import execution_ok, result_match, syntax_valid
+from src.evals.scorers import execution_ok, result_match, semantic_judge, syntax_valid
 from src.utils.db import get_schema_string
 
 GOLDEN_PATH = Path(__file__).parent.parent.parent / "datasets" / "golden" / "questions.json"
@@ -104,18 +104,22 @@ def text_to_sql_solver(model: str | None = None) -> Solver:
 def text_to_sql(
     model: str | None = None,
     difficulty: str | None = None,
+    judge_model: str | None = None,
 ) -> Task:
     """
     Full text-to-SQL evaluation task.
 
     Args:
-        model:      LiteLLM model string (overrides DEFAULT_MODEL env var).
-        difficulty: Filter dataset by difficulty: 'easy', 'medium', 'hard', or None for all.
+        model:       LiteLLM model string (overrides DEFAULT_MODEL env var).
+        difficulty:  Filter dataset by difficulty: 'easy', 'medium', 'hard', or None for all.
+        judge_model: LiteLLM model string for the LLM-as-judge scorer
+                     (overrides JUDGE_MODEL env var, defaults to "openai/gpt-4o-mini").
 
-    Scorers run in parallel:
-      - syntax_valid  (did it parse?)
-      - execution_ok  (did it run?)
-      - result_match  (did it return the right rows?)
+    Scorers run in parallel (increasing in sophistication):
+      - syntax_valid    (did it parse?)
+      - execution_ok    (did it run without error?)
+      - result_match    (did it return the exact expected rows?)
+      - semantic_judge  (does an LLM judge agree it answers the question?)
     """
     return Task(
         dataset=load_golden_dataset(difficulty=difficulty),
@@ -124,5 +128,6 @@ def text_to_sql(
             syntax_valid(),
             execution_ok(),
             result_match(),
+            semantic_judge(judge_model=judge_model),
         ],
     )
