@@ -20,7 +20,7 @@ from inspect_ai.dataset import Dataset, MemoryDataset, Sample
 from inspect_ai.scorer import mean
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
-from src.agent.agent import extract_sql, generate_sql
+from src.agent.agent import PromptStrategy, extract_sql, generate_sql
 from src.evals.scorers import execution_ok, result_match, semantic_judge, syntax_valid
 from src.utils.db import get_schema_string
 
@@ -68,7 +68,10 @@ def load_golden_dataset(difficulty: str | None = None) -> Dataset:
 # ---------------------------------------------------------------------------
 
 @solver
-def text_to_sql_solver(model: str | None = None) -> Solver:
+def text_to_sql_solver(
+    model: str | None = None,
+    strategy: PromptStrategy = PromptStrategy.ZERO_SHOT,
+) -> Solver:
     """
     Solver that calls our agent and writes the generated SQL into state.output.
     Inspect AI will pass state.output.completion to each scorer.
@@ -79,7 +82,7 @@ def text_to_sql_solver(model: str | None = None) -> Solver:
         question = state.input_text
         schema = get_schema_string()
 
-        result = generate_sql(question=question, model=_model, schema=schema)
+        result = generate_sql(question=question, model=_model, schema=schema, strategy=strategy)
 
         # Store the SQL as the completion — scorers will read state.output.completion
         state.output.completion = result.sql
@@ -87,6 +90,7 @@ def text_to_sql_solver(model: str | None = None) -> Solver:
         # Attach metadata for Langfuse / Inspect logs
         state.metadata["generated_sql"] = result.sql
         state.metadata["model"] = result.model
+        state.metadata["strategy"] = result.strategy
         state.metadata["prompt_tokens"] = result.prompt_tokens
         state.metadata["completion_tokens"] = result.completion_tokens
         state.metadata["langfuse_trace_id"] = result.trace_id
@@ -105,6 +109,7 @@ def text_to_sql(
     model: str | None = None,
     difficulty: str | None = None,
     judge_model: str | None = None,
+    strategy: PromptStrategy = PromptStrategy.ZERO_SHOT,
 ) -> Task:
     """
     Full text-to-SQL evaluation task.
@@ -114,6 +119,10 @@ def text_to_sql(
         difficulty:  Filter dataset by difficulty: 'easy', 'medium', 'hard', or None for all.
         judge_model: LiteLLM model string for the LLM-as-judge scorer
                      (overrides JUDGE_MODEL env var, defaults to "openai/gpt-4o-mini").
+        strategy:    Prompt strategy to use. One of:
+                       PromptStrategy.ZERO_SHOT        (default)
+                       PromptStrategy.FEW_SHOT_STATIC
+                       PromptStrategy.FEW_SHOT_DYNAMIC
 
     Scorers run in parallel (increasing in sophistication):
       - syntax_valid    (did it parse?)
@@ -123,7 +132,7 @@ def text_to_sql(
     """
     return Task(
         dataset=load_golden_dataset(difficulty=difficulty),
-        solver=text_to_sql_solver(model=model),
+        solver=text_to_sql_solver(model=model, strategy=strategy),
         scorer=[
             syntax_valid(),
             execution_ok(),

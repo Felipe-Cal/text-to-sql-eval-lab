@@ -2,10 +2,24 @@
 Run the text-to-SQL evaluation and print a results table.
 
 Usage:
+  # Default: gpt-4o-mini, zero-shot, all 15 questions
   python scripts/run_eval.py
+
+  # Specific model
   python scripts/run_eval.py --model anthropic/claude-3-haiku-20240307
-  python scripts/run_eval.py --model openai/gpt-4o --difficulty easy
+
+  # Specific prompt strategy
+  python scripts/run_eval.py --strategy few_shot_static
+  python scripts/run_eval.py --strategy few_shot_dynamic
+
+  # Compare all three strategies side by side
+  python scripts/run_eval.py --strategies zero_shot few_shot_static few_shot_dynamic
+
+  # Compare multiple models
   python scripts/run_eval.py --models openai/gpt-4o-mini anthropic/claude-3-haiku-20240307
+
+  # Filter by difficulty
+  python scripts/run_eval.py --model openai/gpt-4o --difficulty hard
 
 This wraps `inspect eval` for convenience with extra pretty-printing.
 For full Inspect AI options (log viewer, etc.) run directly:
@@ -13,7 +27,6 @@ For full Inspect AI options (log viewer, etc.) run directly:
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -24,38 +37,52 @@ from inspect_ai import eval as inspect_eval
 from rich.console import Console
 from rich.table import Table
 
+from src.agent.agent import PromptStrategy
 from src.evals.tasks import text_to_sql
 from src.utils.db import seed_database
 
 load_dotenv()
 console = Console()
 
+STRATEGY_CHOICES = [s.value for s in PromptStrategy]
 
-def run(models: list[str], difficulty: str | None) -> None:
+
+def run(
+    models: list[str],
+    strategies: list[str],
+    difficulty: str | None,
+) -> None:
     # Ensure DB exists
     seed_database()
 
     all_results = []
+    comparing_strategies = len(strategies) > 1
 
     for model in models:
-        console.rule(f"[bold blue]Evaluating: {model}")
+        for strategy_str in strategies:
+            strategy = PromptStrategy(strategy_str)
 
-        logs = inspect_eval(
-            text_to_sql(model=model, difficulty=difficulty),
-            model=model,
-            log_dir="./logs",
-        )
+            # Row label: include strategy only when comparing more than one
+            label = f"{model} [{strategy_str}]" if comparing_strategies else model
 
-        log = logs[0]
-        results = log.results
+            console.rule(f"[bold blue]Evaluating: {label}")
 
-        row = {"model": model}
-        if results and results.scores:
-            for scorer in results.scores:
-                for metric_name, metric_val in scorer.metrics.items():
-                    row[f"{scorer.name}/{metric_name}"] = round(metric_val.value, 3)
+            logs = inspect_eval(
+                text_to_sql(model=model, difficulty=difficulty, strategy=strategy),
+                model=model,
+                log_dir="./logs",
+            )
 
-        all_results.append(row)
+            log = logs[0]
+            results = log.results
+
+            row = {"model": label}
+            if results and results.scores:
+                for scorer in results.scores:
+                    for metric_name, metric_val in scorer.metrics.items():
+                        row[f"{scorer.name}/{metric_name}"] = round(metric_val.value, 3)
+
+            all_results.append(row)
 
     # Print summary table
     console.print()
@@ -82,19 +109,38 @@ def run(models: list[str], difficulty: str | None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run text-to-SQL eval")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--model", type=str, help="Single model to evaluate")
-    group.add_argument("--models", nargs="+", help="Multiple models to compare")
+
+    model_group = parser.add_mutually_exclusive_group()
+    model_group.add_argument("--model", type=str, help="Single model to evaluate")
+    model_group.add_argument("--models", nargs="+", help="Multiple models to compare")
+
+    strategy_group = parser.add_mutually_exclusive_group()
+    strategy_group.add_argument(
+        "--strategy",
+        choices=STRATEGY_CHOICES,
+        default=None,
+        help="Prompt strategy to use (default: zero_shot)",
+    )
+    strategy_group.add_argument(
+        "--strategies",
+        nargs="+",
+        choices=STRATEGY_CHOICES,
+        help="Multiple strategies to compare side by side",
+    )
+
     parser.add_argument(
         "--difficulty",
         choices=["easy", "medium", "hard"],
         default=None,
         help="Filter dataset by difficulty (default: all)",
     )
+
     args = parser.parse_args()
 
     models = args.models or [args.model or "openai/gpt-4o-mini"]
-    run(models=models, difficulty=args.difficulty)
+    strategies = args.strategies or [args.strategy or "zero_shot"]
+
+    run(models=models, strategies=strategies, difficulty=args.difficulty)
 
 
 if __name__ == "__main__":
