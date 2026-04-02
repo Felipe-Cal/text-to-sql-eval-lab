@@ -1,6 +1,6 @@
 # text-to-sql-eval-lab
 
-An evaluation lab for benchmarking LLMs on the text-to-SQL task. Given a natural language question and a database schema, models are asked to generate a SQL query. The lab measures syntax validity, execution correctness, and result accuracy against a golden dataset.
+An evaluation lab for benchmarking LLMs on the text-to-SQL task. Given a natural language question and a database schema, models are asked to generate a SQL query. The lab measures syntax validity, execution correctness, result accuracy, and semantic correctness via an LLM-as-judge — against a golden dataset.
 
 ## How it works
 
@@ -13,18 +13,19 @@ Natural language question + schema
             ▼
       Generated SQL
             │
-     ┌──────┼──────┐
-     ▼      ▼      ▼
- syntax  execute  result
-  valid    ok     match
+     ┌──────┼──────┬──────────┐
+     ▼      ▼      ▼          ▼
+ syntax  execute  result   semantic
+  valid    ok     match     judge
 ```
 
 1. A **question** from the golden dataset is sent to the model along with the database schema.
 2. The model returns a SQL query.
-3. Three **scorers** evaluate the query independently:
+3. Four **scorers** evaluate the query independently, in increasing order of sophistication:
    - `syntax_valid` — parses the SQL with [sqlglot](https://github.com/tobymao/sqlglot); no database needed.
    - `execution_ok` — runs the query against the real DuckDB database; checks it doesn't error.
    - `result_match` — executes the query and compares the returned rows to the golden expected rows (1.0 = exact match, 0.5 = right shape but wrong values, 0.0 = wrong).
+   - `semantic_judge` — sends the question, generated SQL, actual results, and expected results to a judge LLM; parses a structured verdict (`correct` / `partial` / `incorrect`). Catches false negatives from `result_match` caused by different column aliases, equivalent SQL written differently, or minor float precision gaps.
 
 The eval harness is [Inspect AI](https://inspect.aisi.org.uk/), which handles parallelism, logging, and the `inspect view` log explorer.
 
@@ -68,6 +69,9 @@ OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 DEFAULT_MODEL=openai/gpt-4o-mini
 DATABASE_PATH=./datasets/ecommerce.duckdb
+
+# LLM-as-judge scorer — can be a different (stronger) model than the one being evaluated
+JUDGE_MODEL=openai/gpt-4o-mini
 ```
 
 The database is seeded automatically on first run. To reseed manually:
@@ -92,17 +96,19 @@ python scripts/run_eval.py --model openai/gpt-4o --difficulty hard
 python scripts/run_eval.py --models openai/gpt-4o-mini anthropic/claude-haiku-4-5
 ```
 
-Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works — pass the `provider/model-name` string.
+Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works — pass the `provider/model-name` string. The judge model is controlled separately via `JUDGE_MODEL` and can be set to a stronger model (e.g. `openai/gpt-4o`) for stricter evaluation without changing the model under test.
 
 **Example output**
 
 ```
-┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┓
-┃ model             ┃ syntax_valid/accuracy┃ execution_ok/accuracy┃ result_match/accuracy┃
-┡━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━┩
-│ openai/gpt-4o-mini│                 1.000│                1.000│                 0.733│
-└───────────────────┴──────────────────────┴─────────────────────┴──────────────────────┘
+┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ model             ┃ syntax_valid/accuracy┃ execution_ok/accuracy┃ result_match/accuracy┃ semantic_judge/accuracy┃
+┡━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ openai/gpt-4o-mini│                 1.000│                1.000│                 0.733│                   0.867│
+└───────────────────┴──────────────────────┴─────────────────────┴──────────────────────┴────────────────────────┘
 ```
+
+> **Tip:** cases where `result_match = 0` but `semantic_judge = 1` are the interesting ones — the model answered correctly but with SQL that produces output that doesn't byte-for-byte match the golden rows (different alias, equivalent logic, etc.). These are false negatives in the deterministic scorer.
 
 Logs are saved to `./logs/`. Explore them with:
 
@@ -122,10 +128,10 @@ text-to-sql-eval-lab/
 │   └── run_eval.py               # CLI entrypoint
 ├── src/
 │   ├── agent/
-│   │   └── agent.py              # LLM call + SQL extraction
+│   │   └── agent.py              # LLM call + SQL extraction (Langfuse traced)
 │   ├── evals/
 │   │   ├── tasks.py              # Inspect AI Task, Dataset, Solver
-│   │   └── scorers.py            # syntax_valid, execution_ok, result_match
+│   │   └── scorers.py            # syntax_valid, execution_ok, result_match, semantic_judge
 │   └── utils/
 │       └── db.py                 # DuckDB connection, seeding, schema string
 └── pyproject.toml
