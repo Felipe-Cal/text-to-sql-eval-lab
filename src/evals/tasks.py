@@ -91,6 +91,7 @@ def text_to_sql_solver(
         state.metadata["generated_sql"] = result.sql
         state.metadata["model"] = result.model
         state.metadata["strategy"] = result.strategy
+        state.metadata["reasoning"] = result.reasoning   # non-None for chain_of_thought
         state.metadata["prompt_tokens"] = result.prompt_tokens
         state.metadata["completion_tokens"] = result.completion_tokens
         state.metadata["langfuse_trace_id"] = result.trace_id

@@ -4,11 +4,14 @@ Text-to-SQL agent.
 Takes a natural language question + database schema and returns a SQL query.
 Uses LiteLLM so you can swap models via the DEFAULT_MODEL env var.
 
-Supports three prompt strategies via the PromptStrategy enum:
-  zero_shot       — schema + question only (default)
-  few_shot_static — prepends the same 3 hand-picked examples every time
-  few_shot_dynamic — prepends the 3 most similar golden examples, selected
-                     by embedding cosine similarity (one extra API call)
+Supports four prompt strategies via the PromptStrategy enum:
+  zero_shot          — schema + question only (default)
+  few_shot_static    — prepends the same 3 hand-picked examples every time
+  few_shot_dynamic   — prepends the 3 most similar golden examples, selected
+                       by embedding cosine similarity (one extra API call)
+  chain_of_thought   — asks the model to reason step-by-step before writing
+                       SQL; output is parsed from a structured Reasoning/SQL
+                       format and the reasoning is stored in metadata
 """
 
 import os
@@ -34,6 +37,7 @@ class PromptStrategy(str, Enum):
     ZERO_SHOT = "zero_shot"
     FEW_SHOT_STATIC = "few_shot_static"
     FEW_SHOT_DYNAMIC = "few_shot_dynamic"
+    CHAIN_OF_THOUGHT = "chain_of_thought"
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +55,24 @@ Rules:
 - If the question is ambiguous, make the most reasonable assumption.
 """
 
+COT_SYSTEM_PROMPT = """You are an expert SQL engineer. Your job is to convert a natural language question into a single SQL query.
+
+Think through the query step by step before writing SQL. Use EXACTLY this format — no deviations:
+
+Reasoning:
+<Identify which tables are needed, what joins are required, what filters apply, and what aggregations or ordering are needed>
+
+SQL:
+<the single SQL query, no markdown fences, no commentary>
+
+Rules for the SQL:
+- Use the exact table and column names from the schema provided.
+- Use DuckDB SQL dialect (supports YEAR(), MONTH(), ROUND(), standard window functions).
+- Do not use CTEs unless necessary — prefer subqueries for clarity.
+- Always alias aggregated columns with descriptive names.
+- If the question is ambiguous, make the most reasonable assumption.
+"""
+
 # Inserted before the schema when few-shot examples are provided
 FEW_SHOT_EXAMPLE_TEMPLATE = "Question: {question}\nSQL: {sql}"
 
@@ -60,6 +82,13 @@ USER_PROMPT_TEMPLATE = """{few_shot_block}Schema:
 Question: {question}
 
 SQL:"""
+
+# CoT variant — no trailing "SQL:" prompt; the model generates the full
+# Reasoning/SQL block itself per the system prompt instructions
+COT_USER_PROMPT_TEMPLATE = """{few_shot_block}Schema:
+{schema}
+
+Question: {question}"""
 
 
 # ---------------------------------------------------------------------------
@@ -74,15 +103,40 @@ class AgentResult:
     strategy: str
     prompt_tokens: int
     completion_tokens: int
+    reasoning: str | None = field(default=None)   # populated for chain_of_thought
     trace_id: str | None = field(default=None)
 
 
+# ---------------------------------------------------------------------------
+# Extraction helpers
+# ---------------------------------------------------------------------------
+
 def extract_sql(raw: str) -> str:
-    """Strip markdown fences and whitespace from model output."""
-    # Remove ```sql ... ``` or ``` ... ``` blocks
+    """
+    Extract SQL from model output, handling both plain and CoT formats.
+
+    For CoT output (contains a 'SQL:' marker), everything after the last
+    'SQL:' line is taken as the query. For plain output, just strips
+    markdown fences. Backward-compatible with all existing strategies.
+    """
+    # CoT path: find the last "SQL:" marker and take everything after it
+    sql_marker = re.search(r"(?im)^SQL:\s*", raw)
+    if sql_marker:
+        raw = raw[sql_marker.end():]
+
+    # Strip markdown fences (```sql ... ``` or ``` ... ```)
     raw = re.sub(r"```(?:sql)?\s*", "", raw, flags=re.IGNORECASE)
     raw = re.sub(r"```", "", raw)
     return raw.strip()
+
+
+def _extract_reasoning(raw: str) -> str | None:
+    """
+    Pull the Reasoning block out of a CoT response.
+    Returns None if the expected format isn't found.
+    """
+    match = re.search(r"(?im)^Reasoning:\s*\n(.*?)(?=^SQL:)", raw, re.DOTALL)
+    return match.group(1).strip() if match else None
 
 
 def _build_few_shot_block(examples: list[Example]) -> str:
@@ -100,6 +154,10 @@ def _build_few_shot_block(examples: list[Example]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Main agent function
+# ---------------------------------------------------------------------------
+
 @observe(name="text-to-sql")
 def generate_sql(
     question: str,
@@ -115,13 +173,14 @@ def generate_sql(
         model:    LiteLLM model string, e.g. "openai/gpt-4o-mini".
                   Defaults to DEFAULT_MODEL env var.
         schema:   Database schema string. Defaults to the e-commerce schema.
-        strategy: Prompt strategy controlling how (if at all) few-shot
-                  examples are injected. Defaults to ZERO_SHOT.
+        strategy: Prompt strategy to use. Defaults to ZERO_SHOT.
     """
     model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
     schema = schema or get_schema_string()
 
-    # Build few-shot block based on strategy
+    is_cot = strategy == PromptStrategy.CHAIN_OF_THOUGHT
+
+    # Build few-shot block (empty for zero_shot and chain_of_thought)
     if strategy == PromptStrategy.FEW_SHOT_STATIC:
         examples = get_static_examples()
     elif strategy == PromptStrategy.FEW_SHOT_DYNAMIC:
@@ -131,11 +190,15 @@ def generate_sql(
 
     few_shot_block = _build_few_shot_block(examples)
 
+    # Select system prompt and user template based on strategy
+    system_prompt = COT_SYSTEM_PROMPT if is_cot else SYSTEM_PROMPT
+    user_template = COT_USER_PROMPT_TEMPLATE if is_cot else USER_PROMPT_TEMPLATE
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
-            "content": USER_PROMPT_TEMPLATE.format(
+            "content": user_template.format(
                 few_shot_block=few_shot_block,
                 schema=schema,
                 question=question,
@@ -146,12 +209,13 @@ def generate_sql(
     response = litellm.completion(
         model=model,
         messages=messages,
-        temperature=0,       # deterministic output for eval reproducibility
-        max_tokens=512,
+        temperature=0,         # deterministic output for eval reproducibility
+        max_tokens=1024 if is_cot else 512,  # CoT needs room for the reasoning
     )
 
-    raw_sql = response.choices[0].message.content or ""
-    sql = extract_sql(raw_sql)
+    raw = response.choices[0].message.content or ""
+    sql = extract_sql(raw)
+    reasoning = _extract_reasoning(raw) if is_cot else None
 
     lf = get_client()
     lf.update_current_span(
@@ -160,6 +224,7 @@ def generate_sql(
         metadata={
             "model": model,
             "strategy": strategy.value,
+            "reasoning": reasoning,
             "prompt_tokens": response.usage.prompt_tokens,
             "completion_tokens": response.usage.completion_tokens,
         },
@@ -171,6 +236,7 @@ def generate_sql(
         sql=sql,
         model=model,
         strategy=strategy.value,
+        reasoning=reasoning,
         prompt_tokens=response.usage.prompt_tokens,
         completion_tokens=response.usage.completion_tokens,
         trace_id=trace_id,
@@ -180,6 +246,7 @@ def generate_sql(
 if __name__ == "__main__":
     # Quick smoke test
     result = generate_sql("How many customers are there?")
-    print(f"Model:  {result.model}")
-    print(f"SQL:    {result.sql}")
-    print(f"Tokens: {result.prompt_tokens} in / {result.completion_tokens} out")
+    print(f"Model:    {result.model}")
+    print(f"Strategy: {result.strategy}")
+    print(f"SQL:      {result.sql}")
+    print(f"Tokens:   {result.prompt_tokens} in / {result.completion_tokens} out")
