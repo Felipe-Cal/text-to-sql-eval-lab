@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from langfuse import get_client, observe
 
 from src.agent.few_shot import Example, get_dynamic_examples, get_static_examples
-from src.utils.db import get_schema_string
+from src.utils.db import get_schema_string, execute_query
 
 load_dotenv()
 
@@ -105,6 +105,7 @@ class AgentResult:
     completion_tokens: int
     reasoning: str | None = field(default=None)   # populated for chain_of_thought
     trace_id: str | None = field(default=None)
+    attempts: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -164,16 +165,19 @@ def generate_sql(
     model: str | None = None,
     schema: str | None = None,
     strategy: PromptStrategy = PromptStrategy.ZERO_SHOT,
+    max_retries: int = 3,
 ) -> AgentResult:
     """
-    Call the LLM and return the generated SQL query.
+    Call the LLM and return the generated SQL query. Includes a self-correction 
+    retry loop if the generated query fails to execute.
 
     Args:
-        question: Natural language question to convert.
-        model:    LiteLLM model string, e.g. "openai/gpt-4o-mini".
-                  Defaults to DEFAULT_MODEL env var.
-        schema:   Database schema string. Defaults to the e-commerce schema.
-        strategy: Prompt strategy to use. Defaults to ZERO_SHOT.
+        question:    Natural language question to convert.
+        model:       LiteLLM model string, e.g. "openai/gpt-4o-mini".
+                     Defaults to DEFAULT_MODEL env var.
+        schema:      Database schema string. Defaults to the e-commerce schema.
+        strategy:    Prompt strategy to use. Defaults to ZERO_SHOT.
+        max_retries: Number of attempts to successfully execute the SQL.
     """
     model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
     schema = schema or get_schema_string()
@@ -206,16 +210,49 @@ def generate_sql(
         },
     ]
 
-    response = litellm.completion(
-        model=model,
-        messages=messages,
-        temperature=0,         # deterministic output for eval reproducibility
-        max_tokens=1024 if is_cot else 512,  # CoT needs room for the reasoning
-    )
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
 
-    raw = response.choices[0].message.content or ""
-    sql = extract_sql(raw)
-    reasoning = _extract_reasoning(raw) if is_cot else None
+    for attempt in range(max_retries):
+        response = litellm.completion(
+            model=model,
+            messages=messages,
+            temperature=0,         # deterministic output for eval reproducibility
+            max_tokens=1024 if is_cot else 512,  # CoT needs room for the reasoning
+        )
+
+        total_prompt_tokens += response.usage.prompt_tokens
+        total_completion_tokens += response.usage.completion_tokens
+
+        raw = response.choices[0].message.content or ""
+        sql = extract_sql(raw)
+        reasoning = _extract_reasoning(raw) if is_cot else None
+        
+        # If the model didn't output SQL, ask again
+        if not sql:
+            if attempt < max_retries - 1:
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": "You didn't output any valid SQL query. Please provide a SQL query."})
+                continue
+            else:
+                break
+                
+        # Try to execute the SQL against our DuckDB sandbox
+        try:
+            execute_query(sql)
+            # If we get here, it executed without error! We have successful SQL.
+            break
+        except Exception as e:
+            # It failed to execute. If we have retries left, feed the error back!
+            if attempt < max_retries - 1:
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({
+                    "role": "user", 
+                    "content": f"The SQL query resulted in an error when executed in DuckDB:\n{str(e)}\n\nPlease fix the query and try again."
+                })
+            else:
+                # Give up on the last attempt
+                break
 
     lf = get_client()
     lf.update_current_span(
@@ -225,8 +262,9 @@ def generate_sql(
             "model": model,
             "strategy": strategy.value,
             "reasoning": reasoning,
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "attempts": attempt + 1
         },
     )
     trace_id = lf.get_current_trace_id()
@@ -237,9 +275,10 @@ def generate_sql(
         model=model,
         strategy=strategy.value,
         reasoning=reasoning,
-        prompt_tokens=response.usage.prompt_tokens,
-        completion_tokens=response.usage.completion_tokens,
+        prompt_tokens=total_prompt_tokens,
+        completion_tokens=total_completion_tokens,
         trace_id=trace_id,
+        attempts=attempt + 1,
     )
 
 

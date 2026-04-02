@@ -21,7 +21,7 @@ from decimal import Decimal
 
 import litellm
 import sqlglot
-from inspect_ai.scorer import Score, Scorer, Target, accuracy, scorer
+from inspect_ai.scorer import Score, Scorer, Target, accuracy, mean, scorer
 from inspect_ai.solver import TaskState
 from langfuse import get_client
 
@@ -337,6 +337,26 @@ def semantic_judge(judge_model: str | None = None) -> Scorer:
         return Score(
             value=score_value,
             explanation=f"[{verdict.upper()}] {reasoning}",
+        )
+
+    return score
+
+
+# ---------------------------------------------------------------------------
+# Scorer 5: Agent attempts
+# ---------------------------------------------------------------------------
+
+@scorer(metrics=[mean()])
+def avg_attempts() -> Scorer:
+    """
+    Simply returns the number of attempts the agent took as a numerical score.
+    When aggregated via mean(), it shows the average retries across the dataset.
+    """
+    async def score(state: TaskState, target: Target) -> Score:
+        attempts = state.metadata.get("attempts", 1)
+        return Score(
+            value=attempts,
+            explanation=f"Took {attempts} attempts to execute."
         )
 
     return score
