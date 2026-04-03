@@ -16,6 +16,7 @@ Supports four prompt strategies via the PromptStrategy enum:
 
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -106,6 +107,8 @@ class AgentResult:
     reasoning: str | None = field(default=None)   # populated for chain_of_thought
     trace_id: str | None = field(default=None)
     attempts: int = 1
+    cost: float = 0.0
+    latency: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +213,11 @@ def generate_sql(
         },
     ]
 
+    start_time = time.time()
+    
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    total_cost = 0.0
 
     for attempt in range(max_retries):
         response = litellm.completion(
@@ -223,6 +229,13 @@ def generate_sql(
 
         total_prompt_tokens += response.usage.prompt_tokens
         total_completion_tokens += response.usage.completion_tokens
+        
+        try:
+            cost = litellm.completion_cost(completion_response=response)
+            if cost:
+                total_cost += cost
+        except Exception:
+            pass
 
         raw = response.choices[0].message.content or ""
         sql = extract_sql(raw)
@@ -254,6 +267,9 @@ def generate_sql(
                 # Give up on the last attempt
                 break
 
+    end_time = time.time()
+    latency = end_time - start_time
+
     lf = get_client()
     lf.update_current_span(
         input=question,
@@ -264,6 +280,8 @@ def generate_sql(
             "reasoning": reasoning,
             "prompt_tokens": total_prompt_tokens,
             "completion_tokens": total_completion_tokens,
+            "cost": total_cost,
+            "latency": latency,
             "attempts": attempt + 1
         },
     )
@@ -279,6 +297,8 @@ def generate_sql(
         completion_tokens=total_completion_tokens,
         trace_id=trace_id,
         attempts=attempt + 1,
+        cost=total_cost,
+        latency=latency,
     )
 
 

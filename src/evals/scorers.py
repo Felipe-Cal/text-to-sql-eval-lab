@@ -360,3 +360,37 @@ def avg_attempts() -> Scorer:
         )
 
     return score
+
+
+# ---------------------------------------------------------------------------
+# Scorer 6: Cost, Latency, and Tokens
+# ---------------------------------------------------------------------------
+
+@scorer(metrics=[mean()])
+def avg_cost() -> Scorer:
+    """Returns the cost in USD of the API calls for a question."""
+    async def score(state: TaskState, target: Target) -> Score:
+        val = state.metadata.get("cost", 0.0)
+        return Score(value=val, explanation=f"${val:.5f} total cost")
+
+    return score
+
+
+@scorer(metrics=[mean()])
+def avg_latency() -> Scorer:
+    """Returns the wall-clock execution time for a question."""
+    async def score(state: TaskState, target: Target) -> Score:
+        val = state.metadata.get("latency", 0.0)
+        return Score(value=val, explanation=f"{val:.2f}s latency")
+
+    return score
+
+
+@scorer(metrics=[mean()])
+def avg_total_tokens() -> Scorer:
+    """Returns the total token usage (prompt + completion) for a question."""
+    async def score(state: TaskState, target: Target) -> Score:
+        val = state.metadata.get("total_tokens", 0)
+        return Score(value=val, explanation=f"{val} tokens used")
+
+    return score
