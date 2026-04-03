@@ -323,6 +323,96 @@ Eval runs are long (minutes), so this endpoint returns immediately with a `job_i
 
 ---
 
+## Fine-tuning
+
+Rather than prompting a large general-purpose model, fine-tuning trains a small open-source model (Llama 3.1 8B) to specialise in text-to-SQL. The result is a model that requires no few-shot examples or chain-of-thought prompting — it has learned the task directly from data.
+
+### How it works
+
+```
+tuning.json (40 synthetic) + golden/questions.json (15 hand-crafted)
+                │
+                ▼
+  prepare_finetune_data.py
+  Converts Q&A pairs → JSONL chat format (system + user + assistant)
+                │
+                ▼
+  Google Colab T4 GPU
+  Llama 3.1 8B + LoRA adapters (r=16, ~1% of parameters trained)
+  3 epochs, ~15 minutes, SFTTrainer
+                │
+                ▼
+  Export to GGUF (Q4_K_M, ~4.5GB)
+                │
+                ▼
+  ollama create text2sql-llama -f Modelfile
+                │
+                ▼
+  python scripts/run_eval.py --model ollama/text2sql-llama --strategy zero_shot
+```
+
+### Why LoRA instead of full fine-tuning
+
+Full fine-tuning retrains all 8 billion parameters — requires ~80GB VRAM and thousands of dollars. LoRA freezes the original weights and trains small adapter matrices injected into each attention layer, reducing trainable parameters by ~99%. With 4-bit quantization (QLoRA), the whole thing fits on a free Colab T4 GPU.
+
+### Step 1 — Prepare the data (run locally)
+
+```bash
+python scripts/prepare_finetune_data.py
+```
+
+Outputs:
+- `datasets/finetune/train.jsonl` — 90% of combined dataset (40 examples)
+- `datasets/finetune/eval.jsonl` — 10% held out for training-time eval (5 examples)
+
+Each example is formatted as a three-turn conversation:
+```json
+{
+  "messages": [
+    {"role": "system",    "content": "You are an expert SQL engineer..."},
+    {"role": "user",      "content": "Schema:\n...\n\nQuestion: What is the total revenue?"},
+    {"role": "assistant", "content": "SELECT ROUND(SUM(oi.quantity * oi.unit_price), 2) ..."}
+  ]
+}
+```
+
+### Step 2 — Train on Colab
+
+1. Open `notebooks/finetune_llama.ipynb` in Google Colab
+2. Set runtime to **T4 GPU** (`Runtime → Change runtime type → T4 GPU`)
+3. Run all cells — training takes ~15 minutes
+4. Download the exported GGUF file
+
+### Step 3 — Serve locally with Ollama
+
+```bash
+# Import the fine-tuned model
+echo 'FROM ./text2sql-llama.Q4_K_M.gguf' > Modelfile
+ollama create text2sql-llama -f Modelfile
+
+# Run it
+ollama run text2sql-llama
+```
+
+### Step 4 — Evaluate and compare
+
+```bash
+# LiteLLM supports Ollama natively via the ollama/ prefix
+python scripts/run_eval.py --model ollama/text2sql-llama --strategy zero_shot
+```
+
+The expected comparison (hypothesis — your results may vary):
+
+| Model | Strategy | result_match | cost/query | latency |
+|---|---|---|---|---|
+| gpt-4o-mini | zero_shot | 0.733 | ~$0.001 | ~1.5s |
+| gpt-4o-mini | few_shot_dynamic | 0.933 | ~$0.001 | ~2.0s |
+| Llama 3.1 8B fine-tuned | zero_shot | ??? | $0.000 | ~0.5s |
+
+The fine-tuned model needs zero examples in the prompt — it has learned the task directly from data.
+
+---
+
 ## Model routing
 
 Rather than using the same model and strategy for every question, the router classifies each question's difficulty and dispatches it to the most appropriate model + strategy — saving cost on easy questions while ensuring hard ones get the best treatment.
@@ -619,7 +709,10 @@ text-to-sql-eval-lab/
 │   ├── generate_synthetic.py        # Data flywheel generating validated tuning + holdout datasets
 │   ├── optimize_prompt.py           # DSPy BootstrapFewShot optimizer — compiles few-shot demos from tuning.json
 │   ├── ci_eval.py                   # CI gate — runs evals and exits non-zero if scores breach thresholds
-│   └── benchmark_routing.py         # Compares routed vs. fixed-strategy baselines on quality + cost
+│   ├── benchmark_routing.py         # Compares routed vs. fixed-strategy baselines on quality + cost
+│   └── prepare_finetune_data.py     # Converts Q&A pairs to JSONL chat format for LoRA fine-tuning
+notebooks/
+└── finetune_llama.ipynb             # Colab notebook: LoRA fine-tune Llama 3.1 8B, export to GGUF
 ├── tests/                           # pytest — input/output/adversarial guardrails
 ├── src/
 │   ├── api/

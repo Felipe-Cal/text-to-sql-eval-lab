@@ -162,6 +162,14 @@ datasets/
 - Golden embeddings are cached via `@lru_cache` — not re-embedded on every request.
 - `routed` is a meta-strategy: it resolves to a real strategy before the LLM call. `AgentResult.routed_difficulty` and `router_method` record how the decision was made.
 
+### Fine-tuning (`scripts/prepare_finetune_data.py` + `notebooks/finetune_llama.ipynb`)
+
+- Data prep: combines golden (15) + synthetic tuning (40) → JSONL chat format, 90/10 train/eval split.
+- Training: Llama 3.1 8B + LoRA (r=16) via Unsloth on Colab T4 GPU. ~15 minutes, ~$0 cost.
+- Export: GGUF Q4_K_M for Ollama local serving. LiteLLM supports Ollama via `ollama/` model prefix.
+- Eval: run `python scripts/run_eval.py --model ollama/text2sql-llama --strategy zero_shot` to benchmark.
+- The hypothesis: a fine-tuned small model approaches few_shot_dynamic quality at zero marginal cost.
+
 ### DSPy optimizer (`scripts/optimize_prompt.py`)
 
 - Uses `dspy.ChainOfThought(TextToSQL)` — the `TextToSQL` Signature declares `schema + question → sql`.
