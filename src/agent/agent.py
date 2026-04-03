@@ -40,6 +40,7 @@ class PromptStrategy(str, Enum):
     FEW_SHOT_DYNAMIC = "few_shot_dynamic"
     CHAIN_OF_THOUGHT = "chain_of_thought"
     RAG = "rag"
+    DSPY = "dspy"
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +188,7 @@ def generate_sql(
     model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
     is_cot = strategy == PromptStrategy.CHAIN_OF_THOUGHT
     
-    if strategy == PromptStrategy.RAG:
+    if strategy in (PromptStrategy.RAG, PromptStrategy.DSPY):
         from src.agent.schema_retriever import retrieve_schema
         schema_local, retrieved_tables = retrieve_schema(question, top_k=5)
         schema = schema or schema_local
@@ -227,53 +228,87 @@ def generate_sql(
     total_completion_tokens = 0
     total_cost = 0.0
 
-    for attempt in range(max_retries):
-        response = litellm.completion(
-            model=model,
-            messages=messages,
-            temperature=0,         # deterministic output for eval reproducibility
-            max_tokens=1024 if is_cot else 512,  # CoT needs room for the reasoning
-        )
-
-        total_prompt_tokens += response.usage.prompt_tokens
-        total_completion_tokens += response.usage.completion_tokens
+    if strategy == PromptStrategy.DSPY:
+        from src.agent.dspy_module import get_dspy_agent
+        dspy_agent, dspy_lm = get_dspy_agent(model)
         
-        try:
-            cost = litellm.completion_cost(completion_response=response)
-            if cost:
-                total_cost += cost
-        except Exception:
-            pass
-
-        raw = response.choices[0].message.content or ""
-        sql = extract_sql(raw)
-        reasoning = _extract_reasoning(raw) if is_cot else None
-        
-        # If the model didn't output SQL, ask again
-        if not sql:
-            if attempt < max_retries - 1:
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({"role": "user", "content": "You didn't output any valid SQL query. Please provide a SQL query."})
-                continue
-            else:
+        for attempt in range(max_retries):
+            pred = dspy_agent(schema=schema, question=question)
+            raw = pred.sql
+            sql = extract_sql(raw)
+            reasoning = getattr(pred, "reasoning", "")
+            
+            try:
+                execute_query(sql)
                 break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    question = f"{question}\n\nLast SQL failed: {str(e)}. Fix it."
+                else:
+                    break
+                    
+        # Extract tokens and cost natively from DSPy 3's history
+        if getattr(dspy_lm, "history", None):
+            for interaction in dspy_lm.history[-max_retries:]:
+                if "usage" in interaction and interaction["usage"]:
+                    usage = interaction["usage"]
+                    if hasattr(usage, "prompt_tokens"):
+                        total_prompt_tokens += getattr(usage, "prompt_tokens", 0)
+                        total_completion_tokens += getattr(usage, "completion_tokens", 0)
+                    elif isinstance(usage, dict):
+                        total_prompt_tokens += usage.get("prompt_tokens", 0)
+                        total_completion_tokens += usage.get("completion_tokens", 0)
                 
-        # Try to execute the SQL against our DuckDB sandbox
-        try:
-            execute_query(sql)
-            # If we get here, it executed without error! We have successful SQL.
-            break
-        except Exception as e:
-            # It failed to execute. If we have retries left, feed the error back!
-            if attempt < max_retries - 1:
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user", 
-                    "content": f"The SQL query resulted in an error when executed in DuckDB:\n{str(e)}\n\nPlease fix the query and try again."
-                })
-            else:
-                # Give up on the last attempt
+                if "cost" in interaction and interaction["cost"]:
+                    total_cost += float(interaction["cost"])
+    else:
+        for attempt in range(max_retries):
+            response = litellm.completion(
+                model=model,
+                messages=messages,
+                temperature=0,         # deterministic output for eval reproducibility
+                max_tokens=1024 if is_cot else 512,  # CoT needs room for the reasoning
+            )
+    
+            total_prompt_tokens += response.usage.prompt_tokens
+            total_completion_tokens += response.usage.completion_tokens
+            
+            try:
+                cost = litellm.completion_cost(completion_response=response)
+                if cost:
+                    total_cost += cost
+            except Exception:
+                pass
+    
+            raw = response.choices[0].message.content or ""
+            sql = extract_sql(raw)
+            reasoning = _extract_reasoning(raw) if is_cot else None
+            
+            # If the model didn't output SQL, ask again
+            if not sql:
+                if attempt < max_retries - 1:
+                    messages.append({"role": "assistant", "content": raw})
+                    messages.append({"role": "user", "content": "You didn't output any valid SQL query. Please provide a SQL query."})
+                    continue
+                else:
+                    break
+                    
+            # Try to execute the SQL against our DuckDB sandbox
+            try:
+                execute_query(sql)
+                # If we get here, it executed without error! We have successful SQL.
                 break
+            except Exception as e:
+                # It failed to execute. If we have retries left, feed the error back!
+                if attempt < max_retries - 1:
+                    messages.append({"role": "assistant", "content": raw})
+                    messages.append({
+                        "role": "user", 
+                        "content": f"The SQL query resulted in an error when executed in DuckDB:\n{str(e)}\n\nPlease fix the query and try again."
+                    })
+                else:
+                    # Give up on the last attempt
+                    break
 
     end_time = time.time()
     latency = end_time - start_time
