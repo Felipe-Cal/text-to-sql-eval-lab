@@ -4,7 +4,7 @@ Text-to-SQL agent.
 Takes a natural language question + database schema and returns a SQL query.
 Uses LiteLLM so you can swap models via the DEFAULT_MODEL env var.
 
-Supports four prompt strategies via the PromptStrategy enum:
+Supports prompt strategies via the PromptStrategy enum:
   zero_shot          — schema + question only (default)
   few_shot_static    — prepends the same 3 hand-picked examples every time
   few_shot_dynamic   — prepends the 3 most similar golden examples, selected
@@ -12,6 +12,11 @@ Supports four prompt strategies via the PromptStrategy enum:
   chain_of_thought   — asks the model to reason step-by-step before writing
                        SQL; output is parsed from a structured Reasoning/SQL
                        format and the reasoning is stored in metadata
+  rag                — retrieves top-K relevant tables from the 50-table DWH
+                       instead of sending the full schema
+  dspy               — uses the DSPy compiled module for inference
+  routed             — classifies question difficulty, then routes to the
+                       appropriate model + strategy automatically
 """
 
 import os
@@ -41,6 +46,7 @@ class PromptStrategy(str, Enum):
     CHAIN_OF_THOUGHT = "chain_of_thought"
     RAG = "rag"
     DSPY = "dspy"
+    ROUTED = "routed"
 
 
 # ---------------------------------------------------------------------------
@@ -106,12 +112,14 @@ class AgentResult:
     strategy: str
     prompt_tokens: int
     completion_tokens: int
-    reasoning: str | None = field(default=None)   # populated for chain_of_thought
+    reasoning: str | None = field(default=None)       # populated for chain_of_thought
     trace_id: str | None = field(default=None)
     attempts: int = 1
     cost: float = 0.0
     latency: float = 0.0
     retrieved_tables: list[str] = field(default_factory=list)
+    routed_difficulty: str | None = field(default=None)   # populated for routed strategy
+    router_method: str | None = field(default=None)       # rule_based | embedding
 
 
 # ---------------------------------------------------------------------------
@@ -186,8 +194,21 @@ def generate_sql(
         max_retries: Number of attempts to successfully execute the SQL.
     """
     model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
+
+    # Routing: classify difficulty and pick the best model + strategy automatically.
+    # The resolved strategy replaces ROUTED for all subsequent logic.
+    routed_difficulty: str | None = None
+    router_method: str | None = None
+    if strategy == PromptStrategy.ROUTED:
+        from src.agent.router import route
+        decision = route(question)
+        model = decision.model
+        strategy = PromptStrategy(decision.strategy)
+        routed_difficulty = decision.difficulty
+        router_method = decision.method
+
     is_cot = strategy == PromptStrategy.CHAIN_OF_THOUGHT
-    
+
     if strategy in (PromptStrategy.RAG, PromptStrategy.DSPY):
         from src.agent.schema_retriever import retrieve_schema
         schema_local, retrieved_tables = retrieve_schema(question, top_k=5)
@@ -326,7 +347,9 @@ def generate_sql(
             "cost": total_cost,
             "latency": latency,
             "attempts": attempt + 1,
-            "retrieved_tables": retrieved_tables
+            "retrieved_tables": retrieved_tables,
+            "routed_difficulty": routed_difficulty,
+            "router_method": router_method,
         },
     )
     trace_id = lf.get_current_trace_id()
@@ -344,6 +367,8 @@ def generate_sql(
         cost=total_cost,
         latency=latency,
         retrieved_tables=retrieved_tables,
+        routed_difficulty=routed_difficulty,
+        router_method=router_method,
     )
 
 

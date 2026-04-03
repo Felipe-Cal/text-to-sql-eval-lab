@@ -129,6 +129,7 @@ datasets/
 | `few_shot_dynamic` | 3 examples selected by cosine similarity to the question embedding |
 | `chain_of_thought` | System prompt instructs step-by-step reasoning; output parsed from `Reasoning: / SQL:` format |
 | `rag` | Top-K table definitions retrieved by embedding similarity from 50-table DWH; schema not sent in full |
+| `routed` | Classifies question difficulty (rule-based → embedding k-NN), then resolves to best model + strategy |
 
 **Recommended strategy: `few_shot_dynamic`** — +27% result_match vs zero_shot, +4s latency.
 
@@ -152,6 +153,14 @@ datasets/
 - `POST /evals/run` — starts an Inspect AI eval in the background via `BackgroundTasks`, returns `job_id` (202 Accepted).
 - `GET /evals/{job_id}` — polls job status and returns scores when complete.
 - Job state is stored in an in-memory dict (fine for local use; swap for Redis in production).
+
+### Model router (`src/agent/router.py`)
+
+- Two-stage classifier: rule-based first (free), embedding k-NN fallback (one API call) when rule confidence < 0.30.
+- Routing table: easy → zero_shot, medium → few_shot_dynamic, hard → few_shot_dynamic on HARD_MODEL.
+- `HARD_MODEL` env var escalates hard questions to a stronger model. Defaults to `DEFAULT_MODEL` if not set.
+- Golden embeddings are cached via `@lru_cache` — not re-embedded on every request.
+- `routed` is a meta-strategy: it resolves to a real strategy before the LLM call. `AgentResult.routed_difficulty` and `router_method` record how the decision was made.
 
 ### DSPy optimizer (`scripts/optimize_prompt.py`)
 

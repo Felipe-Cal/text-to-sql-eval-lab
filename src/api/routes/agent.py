@@ -33,6 +33,8 @@ class QueryResponse(BaseModel):
     latency: float
     attempts: int
     trace_id: str | None
+    routed_difficulty: str | None
+    router_method: str | None
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -60,4 +62,6 @@ async def query(request: QueryRequest):
         latency=result.latency,
         attempts=result.attempts,
         trace_id=result.trace_id,
+        routed_difficulty=result.routed_difficulty,
+        router_method=result.router_method,
     )
