@@ -141,16 +141,15 @@ def seed_database(db_path: Path = DB_PATH, force: bool = False) -> None:
 
 
 def get_schema_string(db_path: Path = DB_PATH) -> str:
-    """Return a concise schema description to inject into LLM prompts."""
-    return """
-Database: E-commerce store (DuckDB dialect)
+    """Return an unmanageably large schema description to mimic Enterprise DWH."""
+    from src.agent.schema_retriever import ALL_TABLES
+    
+    tables_str = "\n  ".join(ALL_TABLES)
+    return f"""
+Database: Enterprise Data Warehouse (DuckDB dialect)
 
 Tables:
-  customers(id, name, email, country, signup_date DATE)
-  products(id, name, category, price DECIMAL)
-  orders(id, customer_id, order_date DATE, status VARCHAR)
-    -- status values: 'completed', 'pending', 'cancelled'
-  order_items(id, order_id, product_id, quantity INTEGER, unit_price DECIMAL)
+  {tables_str}
 
 Relationships:
   orders.customer_id → customers.id

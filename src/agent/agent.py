@@ -39,6 +39,7 @@ class PromptStrategy(str, Enum):
     FEW_SHOT_STATIC = "few_shot_static"
     FEW_SHOT_DYNAMIC = "few_shot_dynamic"
     CHAIN_OF_THOUGHT = "chain_of_thought"
+    RAG = "rag"
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +110,7 @@ class AgentResult:
     attempts: int = 1
     cost: float = 0.0
     latency: float = 0.0
+    retrieved_tables: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -183,9 +185,15 @@ def generate_sql(
         max_retries: Number of attempts to successfully execute the SQL.
     """
     model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
-    schema = schema or get_schema_string()
-
     is_cot = strategy == PromptStrategy.CHAIN_OF_THOUGHT
+    
+    if strategy == PromptStrategy.RAG:
+        from src.agent.schema_retriever import retrieve_schema
+        schema_local, retrieved_tables = retrieve_schema(question, top_k=5)
+        schema = schema or schema_local
+    else:
+        schema = schema or get_schema_string()
+        retrieved_tables = []
 
     # Build few-shot block (empty for zero_shot and chain_of_thought)
     if strategy == PromptStrategy.FEW_SHOT_STATIC:
@@ -282,7 +290,8 @@ def generate_sql(
             "completion_tokens": total_completion_tokens,
             "cost": total_cost,
             "latency": latency,
-            "attempts": attempt + 1
+            "attempts": attempt + 1,
+            "retrieved_tables": retrieved_tables
         },
     )
     trace_id = lf.get_current_trace_id()
@@ -299,6 +308,7 @@ def generate_sql(
         attempts=attempt + 1,
         cost=total_cost,
         latency=latency,
+        retrieved_tables=retrieved_tables,
     )
 
 

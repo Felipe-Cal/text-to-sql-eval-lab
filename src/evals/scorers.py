@@ -394,3 +394,36 @@ def avg_total_tokens() -> Scorer:
         return Score(value=val, explanation=f"{val} tokens used")
 
     return score
+
+
+@scorer(metrics=[mean()])
+def retrieval_recall() -> Scorer:
+    """Returns the % of required tables that were successfully retrieved by the RAG module."""
+    async def score(state: TaskState, target: Target) -> Score:
+        golden_sql = target.text
+        try:
+            ast = sqlglot.parse_one(golden_sql, read="duckdb")
+            # extract table names
+            required_tables = set(t.name.lower() for t in ast.find_all(sqlglot.expressions.Table))
+        except Exception:
+            return Score(value=0.0, explanation="Failed to parse golden SQL")
+
+        # Exclude temporary CTE names or subqueries that might show up as tables
+        # For simplicity, we assume they are standard if they match our known lists, but 
+        # doing 'in retrieved_tables' covers it well.
+            
+        retrieved_tables = state.metadata.get("retrieved_tables", [])
+        
+        if not retrieved_tables:
+             return Score(value=1.0, explanation="Full schema used (no retriever)")
+
+        found = 0
+        for req in required_tables:
+            # Check if any retrieved table definition starts with the table name (e.g., "orders(")
+            if any(f"{req}(" in rt.lower() for rt in retrieved_tables):
+                found += 1
+                
+        ratio = found / len(required_tables) if required_tables else 1.0
+        return Score(value=ratio, explanation=f"Found {found}/{len(required_tables)} golden tables in top-K")
+
+    return score
