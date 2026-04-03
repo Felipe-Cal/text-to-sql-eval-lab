@@ -15,3 +15,10 @@ results/
 .claude/
 logs/
 *.eval
+
+# Large model files — store outside the repo
+*.gguf
+*.bin
+*.safetensors
+text2sql-llama-adapter/
+text2sql-llama-adapter.zip
