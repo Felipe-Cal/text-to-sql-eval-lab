@@ -1,0 +1,52 @@
+name: Eval Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  eval:
+    name: Run eval suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Seed database
+        run: python src/utils/db.py
+
+      - name: Run eval gate
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEFAULT_MODEL: openai/gpt-4o-mini
+          JUDGE_MODEL: openai/gpt-4o-mini
+          EMBEDDING_MODEL: openai/text-embedding-3-small
+        run: |
+          python scripts/ci_eval.py \
+            --model openai/gpt-4o-mini \
+            --strategy zero_shot \
+            --syntax-valid 0.95 \
+            --execution-ok 0.85 \
+            --result-match 0.70 \
+            --semantic-judge 0.80
+
+      - name: Upload eval logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-logs
+          path: logs/
+          retention-days: 14

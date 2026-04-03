@@ -389,6 +389,63 @@ The key difference: DSPy demos are chosen because they were **empirically proven
 
 ---
 
+## Evals-as-CI (GitHub Actions)
+
+Every push and pull request to `main` runs the eval suite automatically via GitHub Actions. The pipeline blocks merges if scores drop below defined thresholds — preventing prompt regressions the same way unit tests prevent code regressions.
+
+### How it works
+
+```
+PR opened / push to main
+        │
+        ▼
+GitHub Actions: eval.yml
+        │
+        ├── Install dependencies
+        ├── Seed DuckDB
+        └── python scripts/ci_eval.py
+                │
+                ├── Runs full eval (15 questions, zero_shot)
+                ├── Compares each scorer against threshold
+                │
+                ├── All pass → ✅ CI green, PR can merge
+                └── Any fail → ❌ CI red, merge blocked
+```
+
+### Thresholds
+
+Set conservatively below the known zero_shot baseline to catch real regressions without being brittle to natural LLM variance:
+
+| Scorer | Threshold | Baseline |
+|---|---|---|
+| `syntax_valid` | 0.95 | 1.00 |
+| `execution_ok` | 0.85 | 0.933 |
+| `result_match` | 0.70 | 0.733 |
+| `semantic_judge` | 0.80 | 0.867 |
+
+### Setup
+
+Add your API keys as GitHub Actions secrets in your repo settings:
+
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY` (optional, only needed if testing Anthropic models)
+
+The workflow file is at `.github/workflows/eval.yml`. Eval logs are uploaded as artifacts and retained for 14 days — download them from the Actions tab and explore with `python -m inspect_ai view start --log-dir ./logs`.
+
+### Running the gate locally
+
+```bash
+# Default thresholds, zero_shot
+python scripts/ci_eval.py
+
+# Custom strategy and thresholds
+python scripts/ci_eval.py --strategy few_shot_dynamic --result-match 0.90
+
+# Exits 0 on pass, 1 on failure — safe to use in any shell script or CI system
+```
+
+---
+
 ## Guardrails and tests (pytest)
 
 Implementation lives under [`src/guardrails/`](src/guardrails/): deterministic checks with **no extra LLM calls**. Call `check_input` before the LLM and `check_output` on generated SQL before execution when you wire a production path; this repo ships the **library plus tests** so behavior stays regression-tested.
@@ -471,6 +528,9 @@ Open the URL printed in the terminal (default [http://127.0.0.1:7575](http://127
 
 ```
 text-to-sql-eval-lab/
+├── .github/
+│   └── workflows/
+│       └── eval.yml                 # CI eval gate — runs on every PR and push to main
 ├── datasets/
 │   ├── ecommerce.duckdb             # DuckDB database (auto-created)
 │   └── golden/
@@ -478,7 +538,8 @@ text-to-sql-eval-lab/
 ├── scripts/
 │   ├── run_eval.py                  # CLI entrypoint — supports --model(s), --strategy/strategies, --difficulty
 │   ├── generate_synthetic.py        # Data flywheel generating validated tuning + holdout datasets
-│   └── optimize_prompt.py           # DSPy BootstrapFewShot optimizer — compiles few-shot demos from tuning.json
+│   ├── optimize_prompt.py           # DSPy BootstrapFewShot optimizer — compiles few-shot demos from tuning.json
+│   └── ci_eval.py                   # CI gate — runs evals and exits non-zero if scores breach thresholds
 ├── tests/                           # pytest — input/output/adversarial guardrails
 ├── src/
 │   ├── api/

@@ -170,6 +170,10 @@ datasets/
 
 ---
 
+## Documentation
+
+Always update `README.md` when adding or changing a feature. Every new endpoint, script, strategy, architectural decision, or significant behaviour change needs a corresponding README update. Do not leave documentation lagging behind the code.
+
 ## Commits
 
 Do not include Claude in commit authorship or co-author attribution.
