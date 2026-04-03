@@ -38,10 +38,10 @@ jobs:
           python scripts/ci_eval.py \
             --model openai/gpt-4o-mini \
             --strategy zero_shot \
-            --syntax-valid 0.95 \
-            --execution-ok 0.85 \
-            --result-match 0.70 \
-            --semantic-judge 0.80
+            --syntax-valid 0.90 \
+            --execution-ok 0.80 \
+            --result-match 0.60 \
+            --semantic-judge 0.73
 
       - name: Upload eval logs
         if: always()

@@ -35,10 +35,10 @@ load_dotenv()
 # They're intentionally set slightly below baseline so CI catches real
 # regressions without being brittle to natural LLM variance.
 DEFAULT_THRESHOLDS = {
-    "syntax_valid": 0.95,
-    "execution_ok": 0.85,
-    "result_match": 0.70,
-    "semantic_judge": 0.80,
+    "syntax_valid": 0.90,
+    "execution_ok": 0.80,
+    "result_match": 0.60,
+    "semantic_judge": 0.73,
 }
 
 

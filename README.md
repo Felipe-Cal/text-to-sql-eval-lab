@@ -497,10 +497,10 @@ Set conservatively below the known zero_shot baseline to catch real regressions 
 
 | Scorer | Threshold | Baseline |
 |---|---|---|
-| `syntax_valid` | 0.95 | 1.00 |
-| `execution_ok` | 0.85 | 0.933 |
-| `result_match` | 0.70 | 0.733 |
-| `semantic_judge` | 0.80 | 0.867 |
+| `syntax_valid` | 0.90 | 1.00 |
+| `execution_ok` | 0.80 | 0.933 |
+| `result_match` | 0.60 | 0.733 |
+| `semantic_judge` | 0.73 | 0.867 |
 
 ### Setup
 
