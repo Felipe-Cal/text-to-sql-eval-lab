@@ -400,7 +400,7 @@ def avg_total_tokens() -> Scorer:
 def retrieval_recall() -> Scorer:
     """Returns the % of required tables that were successfully retrieved by the RAG module."""
     async def score(state: TaskState, target: Target) -> Score:
-        golden_sql = target.text
+        golden_sql = state.metadata.get("reference_sql", "")
         try:
             ast = sqlglot.parse_one(golden_sql, read="duckdb")
             # extract table names
