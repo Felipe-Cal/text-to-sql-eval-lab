@@ -26,12 +26,15 @@ Natural language question + schema
    - `execution_ok` — runs the query against the real DuckDB database; checks it doesn't error.
    - `result_match` — executes the query and compares the returned rows to the golden expected rows (1.0 = exact match, 0.5 = right shape but wrong values, 0.0 = wrong).
    - `semantic_judge` — sends the question, generated SQL, actual results, and expected results to a judge LLM; parses a structured verdict (`correct` / `partial` / `incorrect`). Catches false negatives from `result_match` caused by different column aliases, equivalent SQL written differently, or minor float precision gaps.
+4. **Self-Correction loop**: If a generated query throws a syntax or execution error in DuckDB, the agent automatically feeds the error back into its conversation history and retries up to 3 times.
+5. **Constraint tracking**: Custom Inspect metrics natively track the `cost`, `latency`, `tokens`, and average `attempts` required for the run, tracking production viability alongside raw accuracy.
 
 The eval harness is [Inspect AI](https://inspect.aisi.org.uk/), which handles parallelism, logging, and the `inspect view` log explorer.
 
 ## Dataset
 
-15 hand-crafted question/answer pairs in [`datasets/golden/questions.json`](datasets/golden/questions.json) against a toy e-commerce DuckDB database.
+1. **Golden Suite:** 15 hand-crafted question/answer pairs in `datasets/golden/questions.json` against a toy e-commerce DuckDB database.
+2. **Synthetic Data Flywheel:** The script `scripts/generate_synthetic.py` uses an LLM to look at the schema, invent difficult questions, and *verify* them by executing them against the DuckDB instance. Validated outputs are split into `tuning.json` (80%) and `holdout_test.json` (20%) to test for generalization and prevent prompt overfitting.
 
 **Schema**
 
@@ -240,7 +243,8 @@ text-to-sql-eval-lab/
 │   └── golden/
 │       └── questions.json           # 15 golden Q&A pairs
 ├── scripts/
-│   └── run_eval.py                  # CLI entrypoint — supports --model(s), --strategy/strategies, --difficulty
+│   ├── run_eval.py                  # CLI entrypoint — supports --model(s), --strategy/strategies, --difficulty
+│   └── generate_synthetic.py        # Data flywheel generating validated tuning + holdout datasets
 ├── tests/                           # pytest — input/output/adversarial guardrails
 ├── src/
 │   ├── guardrails/

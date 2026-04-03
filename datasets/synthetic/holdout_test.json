@@ -1,0 +1,346 @@
+[
+  {
+    "question": "What is the total revenue per category for customers in the USA?",
+    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category",
+    "difficulty": "medium",
+    "notes": "JOIN across 4 tables with aggregation",
+    "expected_rows": [
+      [
+        "Electronics",
+        649.93
+      ],
+      [
+        "Stationery",
+        49.95
+      ]
+    ],
+    "id": "sq046"
+  },
+  {
+    "question": "What is the total number of products sold per order for completed orders?",
+    "sql": "SELECT o.id AS order_id, SUM(oi.quantity) AS total_products_sold FROM orders o JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' GROUP BY o.id",
+    "difficulty": "medium",
+    "notes": "Aggregation on order items",
+    "expected_rows": [
+      [
+        1,
+        2
+      ],
+      [
+        2,
+        1
+      ],
+      [
+        3,
+        5
+      ],
+      [
+        5,
+        2
+      ],
+      [
+        7,
+        7
+      ],
+      [
+        8,
+        1
+      ],
+      [
+        9,
+        1
+      ],
+      [
+        11,
+        1
+      ],
+      [
+        12,
+        1
+      ],
+      [
+        14,
+        2
+      ],
+      [
+        15,
+        3
+      ]
+    ],
+    "id": "sq044"
+  },
+  {
+    "question": "How many orders were cancelled by each customer?",
+    "sql": "SELECT c.id, c.name, COUNT(o.id) AS cancelled_orders FROM customers c JOIN orders o ON c.id = o.customer_id WHERE o.status = 'cancelled' GROUP BY c.id, c.name",
+    "difficulty": "medium",
+    "notes": "Counting cancelled orders with GROUP BY",
+    "expected_rows": [
+      [
+        8,
+        "Hugo Dubois",
+        1
+      ],
+      [
+        3,
+        "Clara Sousa",
+        1
+      ]
+    ],
+    "id": "sq014"
+  },
+  {
+    "question": "What is the total revenue per category for customers in the USA?",
+    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category;",
+    "difficulty": "medium",
+    "notes": "JOIN across 4 tables with aggregation",
+    "expected_rows": [
+      [
+        "Electronics",
+        649.93
+      ],
+      [
+        "Stationery",
+        49.95
+      ]
+    ],
+    "id": "sq037"
+  },
+  {
+    "question": "What is the trend of completed orders over the past year by month?",
+    "sql": "SELECT strftime('%Y-%m', o.order_date) AS month, COUNT(o.id) AS completed_orders FROM orders o WHERE o.status = 'completed' AND o.order_date >= DATE '2022-01-01' GROUP BY month ORDER BY month",
+    "difficulty": "medium",
+    "notes": "Time series analysis using date formatting",
+    "expected_rows": [
+      [
+        "2024-01",
+        2
+      ],
+      [
+        "2024-02",
+        1
+      ],
+      [
+        "2024-03",
+        1
+      ],
+      [
+        "2024-04",
+        2
+      ],
+      [
+        "2024-05",
+        1
+      ],
+      [
+        "2024-06",
+        1
+      ],
+      [
+        "2024-07",
+        1
+      ],
+      [
+        "2024-09",
+        1
+      ],
+      [
+        "2024-10",
+        1
+      ]
+    ],
+    "id": "sq023"
+  },
+  {
+    "question": "Which products have generated the most revenue in total?",
+    "sql": "SELECT p.id, p.name, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY p.id, p.name ORDER BY total_revenue DESC",
+    "difficulty": "medium",
+    "notes": "Total revenue calculation with ordering",
+    "expected_rows": [
+      [
+        10,
+        "Monitor 27\"",
+        349.99
+      ],
+      [
+        5,
+        "Ergonomic Chair",
+        299.99
+      ],
+      [
+        2,
+        "Mechanical Keyboard",
+        179.98
+      ],
+      [
+        9,
+        "Webcam HD",
+        159.98
+      ],
+      [
+        3,
+        "USB-C Hub",
+        149.97
+      ],
+      [
+        1,
+        "Wireless Mouse",
+        119.96
+      ],
+      [
+        4,
+        "Desk Lamp",
+        104.97
+      ],
+      [
+        7,
+        "Notebook (A5)",
+        49.95
+      ],
+      [
+        8,
+        "Ballpoint Pens 10pk",
+        24.95
+      ]
+    ],
+    "id": "sq015"
+  },
+  {
+    "question": "What is the average order value per customer for completed orders in the last year?",
+    "sql": "SELECT c.id, c.name, AVG(oi.quantity * oi.unit_price) AS average_order_value FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' AND o.order_date >= DATE '2022-01-01' GROUP BY c.id, c.name",
+    "difficulty": "medium",
+    "notes": "Involves JOINs and aggregation with a date filter",
+    "expected_rows": [
+      [
+        4,
+        "David Chen",
+        57.49
+      ],
+      [
+        6,
+        "Frank M\u00fcller",
+        89.99
+      ],
+      [
+        3,
+        "Clara Sousa",
+        69.98
+      ],
+      [
+        1,
+        "Alice Martin",
+        119.98
+      ],
+      [
+        7,
+        "Grace Kim",
+        33.32
+      ],
+      [
+        2,
+        "Bob Schmidt",
+        128.31
+      ],
+      [
+        9,
+        "Iris Patel",
+        79.99
+      ]
+    ],
+    "id": "sq019"
+  },
+  {
+    "question": "What is the total revenue per category for customers in the USA?",
+    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category",
+    "difficulty": "medium",
+    "notes": "JOIN across 4 tables with aggregation",
+    "expected_rows": [
+      [
+        "Electronics",
+        649.93
+      ],
+      [
+        "Stationery",
+        49.95
+      ]
+    ],
+    "id": "sq012"
+  },
+  {
+    "question": "What is the total revenue generated from each product for all orders with a 'pending' status?",
+    "sql": "SELECT p.id, p.name, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'pending' GROUP BY p.id, p.name",
+    "difficulty": "medium",
+    "notes": "Revenue calculation for pending orders using JOINs",
+    "expected_rows": [
+      [
+        10,
+        "Monitor 27\"",
+        349.99
+      ],
+      [
+        6,
+        "Standing Desk",
+        499.99
+      ]
+    ],
+    "id": "sq027"
+  },
+  {
+    "question": "Which products have been ordered the most in each category in the last six months?",
+    "sql": "SELECT p.category, p.name, SUM(oi.quantity) AS total_quantity FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.order_date >= DATE '2023-03-01' GROUP BY p.category, p.name ORDER BY p.category, total_quantity DESC",
+    "difficulty": "medium",
+    "notes": "GROUP BY with ordering on categories and quantities",
+    "expected_rows": [
+      [
+        "Electronics",
+        "Wireless Mouse",
+        4
+      ],
+      [
+        "Electronics",
+        "USB-C Hub",
+        3
+      ],
+      [
+        "Electronics",
+        "Monitor 27\"",
+        2
+      ],
+      [
+        "Electronics",
+        "Mechanical Keyboard",
+        2
+      ],
+      [
+        "Electronics",
+        "Webcam HD",
+        2
+      ],
+      [
+        "Furniture",
+        "Desk Lamp",
+        3
+      ],
+      [
+        "Furniture",
+        "Standing Desk",
+        2
+      ],
+      [
+        "Furniture",
+        "Ergonomic Chair",
+        2
+      ],
+      [
+        "Stationery",
+        "Ballpoint Pens 10pk",
+        5
+      ],
+      [
+        "Stationery",
+        "Notebook (A5)",
+        5
+      ]
+    ],
+    "id": "sq020"
+  }
+]
