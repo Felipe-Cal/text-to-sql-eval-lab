@@ -12,6 +12,7 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
+import threading
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
@@ -23,6 +24,7 @@ router = APIRouter()
 # In-memory job store: job_id -> job dict
 # Fine for a local lab; swap for Redis in production.
 _jobs: dict[str, dict[str, Any]] = {}
+_eval_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -55,27 +57,28 @@ def _run_eval(job_id: str, request: EvalRunRequest) -> None:
     from src.evals.tasks import text_to_sql
 
     try:
-        task = text_to_sql(
-            model=request.model,
-            difficulty=request.difficulty,
-            judge_model=request.judge_model,
-            strategy=request.strategy,
-        )
-
-        # inspect_ai's eval() requires a model string even when our solver
-        # handles model selection internally. Pass a dummy or the real one.
-        import os
-        inspect_model = request.model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
-
-        logs = inspect_eval(task, model=inspect_model)
-        log = logs[0]
-
-        if log.status == "error":
-            _jobs[job_id]["status"] = "failed"
-            _jobs[job_id]["error"] = str(log.error)
-        else:
-            _jobs[job_id]["status"] = "completed"
-            _jobs[job_id]["results"] = _serialize_log(log)
+        with _eval_lock:
+            task = text_to_sql(
+                model=request.model,
+                difficulty=request.difficulty,
+                judge_model=request.judge_model,
+                strategy=request.strategy,
+            )
+    
+            # inspect_ai's eval() requires a model string even when our solver
+            # handles model selection internally. Pass a dummy or the real one.
+            import os
+            inspect_model = request.model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
+    
+            logs = inspect_eval(task, model=inspect_model)
+            log = logs[0]
+    
+            if log.status == "error":
+                _jobs[job_id]["status"] = "failed"
+                _jobs[job_id]["error"] = str(log.error)
+            else:
+                _jobs[job_id]["status"] = "completed"
+                _jobs[job_id]["results"] = _serialize_log(log)
 
     except Exception as e:
         _jobs[job_id]["status"] = "failed"

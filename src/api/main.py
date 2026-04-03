@@ -11,6 +11,7 @@ Endpoints:
 """
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes.agent import router as agent_router
 from src.api.routes.evals import router as evals_router
@@ -19,6 +20,14 @@ app = FastAPI(
     title="Text-to-SQL API",
     description="Text-to-SQL agent and evaluation service",
     version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(agent_router)

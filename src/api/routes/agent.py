@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.agent.agent import PromptStrategy, generate_sql
+from src.utils.db import get_connection
 
 router = APIRouter()
 
@@ -35,6 +36,7 @@ class QueryResponse(BaseModel):
     trace_id: str | None
     routed_difficulty: str | None
     router_method: str | None
+    data: list[dict] = []
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -47,6 +49,18 @@ async def query(request: QueryRequest):
             model=request.model,
             strategy=request.strategy,
         )
+        
+        # Execute the returned SQL to get pandas DataFrame -> list of dicts
+        con = get_connection()
+        try:
+            # fillna("") ensures JSON compliant response avoiding NaN/Infinity errors
+            df = con.execute(result.sql).fetchdf().fillna("")
+            records = df.to_dict(orient="records")
+        except Exception as e:
+            records = [{"error": str(e)}]
+        finally:
+            con.close()
+            
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -64,4 +78,5 @@ async def query(request: QueryRequest):
         trace_id=result.trace_id,
         routed_difficulty=result.routed_difficulty,
         router_method=result.router_method,
+        data=records
     )
