@@ -24,6 +24,17 @@ Rather than passing all 50 table definitions to the model (which balloons the pr
 
 This simulates a real enterprise use case where the schema is too large to fit in the prompt.
 
+## LangGraph Orchestration & Self-Correction
+
+Regardless of the prompt strategy used, the core SQL generation loop (`generate_sql` in `src/agent/agent.py`) is powered by fundamentally agentic **LangGraph** orchestration. 
+
+We utilize a **Directed Acyclic Graph (DAG)** to orchestrate a deterministic self-correction state machine:
+1. **`generate_node`**: Calls the selected model and outputs a candidate SQL query.
+2. **`execute_node`**: Runs the query safely against DuckDB in `read_only=True` mode.
+3. **Execution Routing**: If DuckDB throws an error (e.g. "Column not found"), the LangGraph conditional edge routes execution back to the `generate_node`. It passes the SQL execution trace verbatim to the LLM so it can learn and self-correct on its next attempt (up to `max_retries`).
+
+This strict State Machine approach guarantees idempotency and isolates generation from logic loops—skills heavily utilized in Staff-level Agent designs.
+
 ## Running a strategy sweep
 
 ```bash
