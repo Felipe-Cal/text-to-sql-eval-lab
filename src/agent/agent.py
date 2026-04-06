@@ -51,10 +51,13 @@ class PromptStrategy(str, Enum):
     FEW_SHOT_STATIC = "few_shot_static"
     FEW_SHOT_DYNAMIC = "few_shot_dynamic"
     CHAIN_OF_THOUGHT = "chain_of_thought"
-    RAG = "rag"
+    RAG_DENSE = "rag_dense"
+    RAG_SPARSE = "rag_sparse"
+    RAG_HYBRID = "rag_hybrid"
     DSPY = "dspy"
     ROUTED = "routed"
     TOOL_USE = "tool_use"
+    RAG = "rag"  # Keep for backward compatibility, defaults to hybrid or dense
 
 
 # ---------------------------------------------------------------------------
@@ -382,9 +385,19 @@ def generate_sql(
 
     is_cot = strategy == PromptStrategy.CHAIN_OF_THOUGHT
 
-    if strategy in (PromptStrategy.RAG, PromptStrategy.DSPY):
+    if strategy in (PromptStrategy.RAG, PromptStrategy.RAG_DENSE, PromptStrategy.RAG_SPARSE, PromptStrategy.RAG_HYBRID, PromptStrategy.DSPY):
         from src.agent.schema_retriever import retrieve_schema
-        schema_local, retrieved_tables = retrieve_schema(question, top_k=5)
+        
+        # Map strategy to retrieval type
+        retrieval_type = "hybrid"
+        if strategy == PromptStrategy.RAG_DENSE:
+            retrieval_type = "dense"
+        elif strategy == PromptStrategy.RAG_SPARSE:
+            retrieval_type = "sparse"
+        elif strategy == PromptStrategy.RAG:
+            retrieval_type = "dense" # Default RAG to dense for now
+            
+        schema_local, retrieved_tables = retrieve_schema(question, top_k=5, retrieval_type=retrieval_type)
         schema = schema or schema_local
     else:
         schema = schema or get_schema_string()

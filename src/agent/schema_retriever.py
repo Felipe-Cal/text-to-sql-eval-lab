@@ -1,8 +1,9 @@
 import os
 import json
-import math
+from typing import Literal
+from qdrant_client import QdrantClient, models
+from fastembed import SparseTextEmbedding
 import litellm
-from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -66,56 +67,138 @@ DECOY_TABLES = [
 
 ALL_TABLES = CORE_TABLES + DECOY_TABLES
 
-def cosine_similarity(v1: list[float], v2: list[float]) -> float:
-    dot_product = sum(a * b for a, b in zip(v1, v2))
-    norm_v1 = math.sqrt(sum(a * a for a in v1))
-    norm_v2 = math.sqrt(sum(a * a for a in v2))
-    return dot_product / (norm_v1 * norm_v2)
+# Configuration
+COLLECTION_NAME = "schema_retriever"
+DENSE_MODEL = os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small")
+SPARSE_MODEL = "prithivida/Splade_PP_en_v1" # High quality sparse model
 
-def get_embeddings(texts: list[str]) -> list[list[float]]:
-    """Fetch embeddings for a batch of texts using LiteLLM."""
-    model = os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small")
-    response = litellm.embedding(model=model, input=texts)
-    # Return embeddings correctly sorted by their implicit index
-    return [item["embedding"] for item in sorted(response.data, key=lambda x: x["index"])]
+# Global state
+_QDRANT_CLIENT = None
+_SPARSE_EMBEDDER = None
 
-# Cache the table embeddings so we don't re-embed 50 schemas on every eval run
-_TABLE_EMBEDDINGS_CACHE = None
-
-def get_table_embeddings() -> list[list[float]]:
-    global _TABLE_EMBEDDINGS_CACHE
-    if _TABLE_EMBEDDINGS_CACHE is None:
-        _TABLE_EMBEDDINGS_CACHE = get_embeddings(ALL_TABLES)
-    return _TABLE_EMBEDDINGS_CACHE
-
-def retrieve_schema(question: str, top_k: int = 5) -> tuple[str, list[str]]:
-    """
-    RAG Schema Linking: Finds the top K most semantically relevant tables for a question.
-    Returns:
-       schema_string: The formatted schema to inject into the LLM.
-       retrieved_tables: List of the raw table definition strings retrieved.
-    """
-    # 1. Embed the question
-    question_embedding = get_embeddings([question])[0]
-    
-    # 2. Get table embeddings
-    table_embeddings = get_table_embeddings()
-    
-    # 3. Calculate cosine similarity
-    scored_tables = []
-    for table_def, emb in zip(ALL_TABLES, table_embeddings):
-        score = cosine_similarity(question_embedding, emb)
-        scored_tables.append((score, table_def))
+def get_retriever():
+    global _QDRANT_CLIENT, _SPARSE_EMBEDDER
+    if _QDRANT_CLIENT is None:
+        _QDRANT_CLIENT = QdrantClient(":memory:")
+        _SPARSE_EMBEDDER = SparseTextEmbedding(model_name=SPARSE_MODEL)
         
-    # 4. Sort descending by score
-    scored_tables.sort(key=lambda x: x[0], reverse=True)
+        # Dense vector size (OpenAI small is 1536)
+        dense_size = 1536
+        
+        # Check if collection exists (though :memory: is always empty on start)
+        if not _QDRANT_CLIENT.collection_exists(COLLECTION_NAME):
+            _QDRANT_CLIENT.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config={
+                    "dense": models.VectorParams(
+                        size=dense_size,
+                        distance=models.Distance.COSINE
+                    )
+                },
+                sparse_vectors_config={
+                    "sparse": models.SparseVectorParams(
+                        index=models.SparseIndexParams(
+                            on_disk=False
+                        )
+                    )
+                }
+            )
+        
+        # Prepare and upload data
+        print("Initializing Qdrant Schema Retriever...")
+        
+        # 1. Generate Dense Embeddings
+        dense_embeddings = [item["embedding"] for item in litellm.embedding(model=DENSE_MODEL, input=ALL_TABLES).data]
+        
+        # 2. Generate Sparse Embeddings
+        sparse_embeddings = list(_SPARSE_EMBEDDER.embed(ALL_TABLES))
+        
+        points = []
+        for i, (table_def, dense, sparse) in enumerate(zip(ALL_TABLES, dense_embeddings, sparse_embeddings)):
+            points.append(models.PointStruct(
+                id=i,
+                vector={
+                    "dense": dense,
+                    "sparse": models.SparseVector(
+                        indices=sparse.indices.tolist(),
+                        values=sparse.values.tolist()
+                    )
+                },
+                payload={"table_def": table_def}
+            ))
+            
+        _QDRANT_CLIENT.upsert(
+            collection_name=COLLECTION_NAME,
+            points=points
+        )
+        print(f"Indexed {len(ALL_TABLES)} tables in Qdrant.")
+        
+    return _QDRANT_CLIENT
+
+def retrieve_schema(
+    question: str, 
+    top_k: int = 5, 
+    retrieval_type: Literal["dense", "sparse", "hybrid"] = "hybrid"
+) -> tuple[str, list[str]]:
+    """
+    RAG Schema Linking using Qdrant with support for multiple retrieval types.
+    """
+    client = get_retriever()
     
-    # 5. Extract top K
-    top_tables = [table_def for score, table_def in scored_tables[:top_k]]
+    if retrieval_type == "dense":
+        # 1. Embed question (dense)
+        question_dense = litellm.embedding(model=DENSE_MODEL, input=[question]).data[0]["embedding"]
+        results = client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=question_dense,
+            using="dense",
+            limit=top_k
+        ).points
+        
+    elif retrieval_type == "sparse":
+        # 2. Embed question (sparse)
+        question_sparse = list(_SPARSE_EMBEDDER.embed([question]))[0]
+        results = client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=models.SparseVector(
+                indices=question_sparse.indices.tolist(),
+                values=question_sparse.values.tolist()
+            ),
+            using="sparse",
+            limit=top_k
+        ).points
+        
+    else: # hybrid
+        # 3. Hybrid search using Reciprocal Rank Fusion (RRF)
+        question_dense = litellm.embedding(model=DENSE_MODEL, input=[question]).data[0]["embedding"]
+        question_sparse = list(_SPARSE_EMBEDDER.embed([question]))[0]
+        
+        results = client.query_points(
+            collection_name=COLLECTION_NAME,
+            prefetch=[
+                models.Prefetch(
+                    query=question_dense,
+                    using="dense",
+                    limit=top_k
+                ),
+                models.Prefetch(
+                    query=models.SparseVector(
+                        indices=question_sparse.indices.tolist(),
+                        values=question_sparse.values.tolist()
+                    ),
+                    using="sparse",
+                    limit=top_k
+                )
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=top_k
+        ).points
+
+    top_tables = [hit.payload["table_def"] for hit in results]
     
-    # 6. Format exactly like get_schema_string()
+    # Format the schema string
     schema_lines = [
-        "Database: Enterprise Data Warehouse (DuckDB dialect)",
+        f"Database: Enterprise Data Warehouse (DuckDB dialect) - Strategy: {retrieval_type}",
         "",
         "Extracted Semantic Tables:"
     ]
@@ -125,7 +208,8 @@ def retrieve_schema(question: str, top_k: int = 5) -> tuple[str, list[str]]:
     return "\n".join(schema_lines), top_tables
 
 if __name__ == "__main__":
-    q = "Who are the top 3 customers by revenue?"
-    schema, tables = retrieve_schema(q, top_k=5)
-    print(f"Question: {q}\n")
-    print(schema)
+    q = "Who are the top 3 customers by revenue? (orders keyword match test)"
+    for r_type in ["dense", "sparse", "hybrid"]:
+        schema, tables = retrieve_schema(q, top_k=5, retrieval_type=r_type)
+        print(f"\n--- Strategy: {r_type} ---")
+        print(schema)

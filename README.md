@@ -174,8 +174,8 @@ text-to-sql-eval-lab/
 | [inspect-ai](https://inspect.ai) | Eval harness — tasks, solvers, scorers, logging |
 | [litellm](https://docs.litellm.ai) | Unified interface to OpenAI, Anthropic, and other providers |
 | [instructor](https://python.useinstructor.com) | Structured outputs via Pydantic schemas — used in `semantic_judge` to replace brittle JSON parsing |
-| [langgraph](https://langchain-ai.github.io/langgraph/) | StateGraph orchestration for the self-correction retry loop in `generate_sql` |
-| [chromadb](https://docs.trychroma.com) | Persistent vector store for the RAG module (alternative to in-memory cosine similarity) |
+| [langgraph](https://langchain-ai.github.io/langgraph/) | State-Machine orchestration for the self-correction retry loop in `generate_sql` |
+| [qdrant-client](https://qdrant.tech) / [fastembed](https://qdrant.github.io/fastembed/) | Hybrid Search (Dense + Sparse/BM25) for high-accuracy schema retrieval |
 | [duckdb](https://duckdb.org) | In-process SQL engine |
 | [sqlglot](https://github.com/tobymao/sqlglot) | SQL parser for syntax validation and output guardrails |
 | [dspy-ai](https://dspy.ai) | Prompt optimization |

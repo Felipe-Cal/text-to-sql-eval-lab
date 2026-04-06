@@ -8,7 +8,9 @@ Seven strategies are available:
 | `few_shot_static` | Prepends 3 fixed examples (easy/medium/hard) | none |
 | `few_shot_dynamic` | Embeds the question, picks 3 most similar golden examples by cosine similarity | 1 embedding call |
 | `chain_of_thought` | Instructs the model to reason step-by-step before writing SQL | none (larger output) |
-| `rag` | Embeds the question and retrieves the top-K most semantically relevant table definitions from the 50-table DWH, rather than sending the full schema | 1 embedding call |
+| `rag_dense` | Semantic retrieval using Qdrant (cosine similarity on embeddings) | 1 embedding call |
+| `rag_sparse` | Keyword retrieval using Qdrant (BM25 token matching) | none (local compute) |
+| `rag_hybrid` | Fusion of dense and sparse retrieval (Reciprocal Rank Fusion) | 1 embedding call |
 | `routed` | Classifies question difficulty (rule-based → embedding k-NN), then resolves to best model + strategy | see [routing.md](routing.md) |
 | `tool_use` | Agentic: the LLM is given tools (`query_database`, `search_knowledge_base`, `get_schema`) and decides which to call. Handles SQL, policy, and hybrid questions in a single interface. | multiple LLM round-trips |
 
@@ -16,14 +18,13 @@ Seven strategies are available:
 
 **Recommended strategy for general assistant (SQL + policies):** `tool_use` — see [tool-use.md](tool-use.md).
 
-## RAG schema linking (`rag` strategy)
+## Advanced RAG schema linking (Qdrant Hybrid Search)
 
-Rather than passing all 50 table definitions to the model (which balloons the prompt and confuses smaller models), the `rag` strategy:
+Rather than passing all 50 table definitions to the model (which balloons the prompt and confuses smaller models), we utilize an advanced RAG pipeline powered by **Qdrant**:
 
-1. Embeds the natural language question using the configured embedding model.
-2. Pre-computes and **caches** embeddings for all 50 table definitions (only once per process).
-3. Ranks tables by **cosine similarity** and injects only the top-K (default: 5) into the prompt.
-4. Tracks `retrieval_recall` as an eval metric — what % of the tables required by the golden SQL were actually retrieved.
+1. **`rag_dense`**: Standard semantic embedding search. Good for finding tables by meaning (e.g. "order history" -> "orders").
+2. **`rag_sparse`**: Lexical search using **BM25** (via FastEmbed). Crucial for exact keyword matches (e.g. searching for a specific column name like `sku_id_v2`).
+3. **`rag_hybrid` (Staff Recommendation)**: Fuses both search results using **Reciprocal Rank Fusion (RRF)**. This is the state-of-the-art approach for robust retrieval.
 
 This simulates a real enterprise use case where the schema is too large to fit in the prompt.
 
