@@ -14,12 +14,14 @@ Each scorer follows the Inspect AI scorer interface:
 
 import json
 import os
-from typing import Any
+from typing import Any, Literal
 
 import datetime
 from decimal import Decimal
 
 import litellm
+import instructor
+from pydantic import BaseModel, Field
 import sqlglot
 from inspect_ai.scorer import Score, Scorer, Target, accuracy, mean, scorer
 from inspect_ai.solver import TaskState
@@ -252,6 +254,14 @@ Reference expected result:
 Does the generated SQL correctly answer the question? Reply with JSON only.\
 """
 
+class VerdictData(BaseModel):
+    verdict: Literal["correct", "partial", "incorrect"] = Field(
+        description="Whether the data fully answers the question (correct), is slightly wrong/incomplete (partial), or is completely wrong (incorrect)."
+    )
+    reasoning: str = Field(
+        description="One or two sentences explaining the judgment."
+    )
+
 
 @scorer(metrics=[accuracy()])
 def semantic_judge(judge_model: str | None = None) -> Scorer:
@@ -309,9 +319,10 @@ def semantic_judge(judge_model: str | None = None) -> Scorer:
             expected_result=expected_result_str,
         )
 
-        # Call the judge LLM
+        # Call the judge LLM with Instructor for structured output
+        client = instructor.from_litellm(litellm.completion)
         try:
-            response = litellm.completion(
+            verdict_obj = client.chat.completions.create(
                 model=_judge_model,
                 messages=[
                     {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
@@ -319,15 +330,13 @@ def semantic_judge(judge_model: str | None = None) -> Scorer:
                 ],
                 temperature=0,
                 max_tokens=256,
-                response_format={"type": "json_object"},
+                response_model=VerdictData,
             )
-            raw = response.choices[0].message.content or ""
-            verdict_data = json.loads(raw)
         except Exception as e:
             return Score(value=0, explanation=f"Judge call failed: {e}")
 
-        verdict = verdict_data.get("verdict", "incorrect").lower().strip()
-        reasoning = verdict_data.get("reasoning", "No reasoning provided.")
+        verdict = verdict_obj.verdict
+        reasoning = verdict_obj.reasoning
 
         score_map = {"correct": 1.0, "partial": 0.5, "incorrect": 0.0}
         score_value = score_map.get(verdict, 0.0)

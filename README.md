@@ -161,6 +161,7 @@ text-to-sql-eval-lab/
 | [fastapi](https://fastapi.tiangolo.com) | HTTP service layer |
 | [inspect-ai](https://inspect.ai) | Eval harness — tasks, solvers, scorers, logging |
 | [litellm](https://docs.litellm.ai) | Unified interface to OpenAI, Anthropic, and other providers |
+| [instructor](https://python.useinstructor.com) | Structured outputs leveraging Pydantic schemas (replaces brittle JSON parsing in evaluation) |
 | [duckdb](https://duckdb.org) | In-process SQL engine |
 | [sqlglot](https://github.com/tobymao/sqlglot) | SQL parser for syntax validation and output guardrails |
 | [dspy-ai](https://dspy.ai) | Prompt optimization |
