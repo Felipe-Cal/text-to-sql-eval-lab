@@ -16,6 +16,8 @@ dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
     "dspy-ai>=2.4.5",
+    "chromadb>=1.0.0",
+    "google-genai",
 ]
 
 [project.optional-dependencies]

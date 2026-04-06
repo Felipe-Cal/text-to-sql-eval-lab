@@ -17,6 +17,10 @@ Supports prompt strategies via the PromptStrategy enum:
   dspy               — uses the DSPy compiled module for inference
   routed             — classifies question difficulty, then routes to the
                        appropriate model + strategy automatically
+  tool_use           — agentic strategy: the LLM is given tools (query_database,
+                       search_knowledge_base, get_schema) and decides which to
+                       call. Can answer both data questions (via SQL) and policy
+                       questions (via KB search) in a single interface.
 """
 
 import os
@@ -47,6 +51,7 @@ class PromptStrategy(str, Enum):
     RAG = "rag"
     DSPY = "dspy"
     ROUTED = "routed"
+    TOOL_USE = "tool_use"
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +118,8 @@ class AgentResult:
     prompt_tokens: int
     completion_tokens: int
     reasoning: str | None = field(default=None)       # populated for chain_of_thought
+    answer: str | None = field(default=None)          # populated for tool_use (final LLM synthesis)
+    tool_calls: list[dict] = field(default_factory=list)  # populated for tool_use
     trace_id: str | None = field(default=None)
     attempts: int = 1
     cost: float = 0.0
@@ -170,6 +177,130 @@ def _build_few_shot_block(examples: list[Example]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool-use agentic loop
+# ---------------------------------------------------------------------------
+
+TOOL_USE_SYSTEM_PROMPT = """You are a helpful data assistant for an e-commerce company.
+You have access to three tools:
+  - query_database: run SQL queries against the live database (customers, orders, products, order_items)
+  - search_knowledge_base: search company policies and procedures (returns, shipping, payments, support)
+  - get_schema: inspect database table definitions before writing SQL
+
+Use the tools to gather information, then synthesise a clear, concise answer.
+Rules:
+  - Always use get_schema or inspect the schema before writing complex SQL if you are unsure of column names.
+  - Prefer query_database for any question involving numbers, counts, or data from the database.
+  - Prefer search_knowledge_base for policy or procedural questions.
+  - You may call multiple tools in sequence if needed.
+  - When you have enough information, respond with a final answer — do not call more tools than necessary.
+  - If a SQL query fails, read the error and retry with a corrected query.
+"""
+
+
+def _run_tool_use_loop(
+    question: str,
+    model: str,
+    max_iterations: int = 10,
+) -> tuple[str, str, list[dict], int, int, float, int]:
+    """
+    Agentic tool-use loop using LiteLLM function calling.
+
+    The LLM receives the question and a set of tool schemas. It decides which
+    tools to call, receives their results, and continues until it produces a
+    final text response (finish_reason != "tool_calls").
+
+    Returns:
+        (answer, sql, tool_calls_log, prompt_tokens, completion_tokens, cost, iterations)
+    """
+    from src.agent.tools import TOOL_SCHEMAS, execute_tool, ToolCallRecord
+
+    messages = [
+        {"role": "system", "content": TOOL_USE_SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+
+    tool_calls_log: list[dict] = []
+    last_sql: str = ""
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_cost = 0.0
+    iterations = 0
+
+    for iteration in range(max_iterations):
+        iterations = iteration + 1
+
+        response = litellm.completion(
+            model=model,
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",   # LLM decides whether to call a tool or respond
+            temperature=0,
+        )
+
+        total_prompt_tokens += response.usage.prompt_tokens
+        total_completion_tokens += response.usage.completion_tokens
+        try:
+            cost = litellm.completion_cost(completion_response=response)
+            if cost:
+                total_cost += cost
+        except Exception:
+            pass
+
+        message = response.choices[0].message
+        finish_reason = response.choices[0].finish_reason
+
+        # Append the assistant message (may contain tool_calls)
+        messages.append(message)
+
+        # If the LLM responded with text — we are done
+        if finish_reason != "tool_calls" or not message.tool_calls:
+            answer = message.content or ""
+            return answer, last_sql, tool_calls_log, total_prompt_tokens, total_completion_tokens, total_cost, iterations
+
+        # Execute each tool call and feed results back
+        for tc in message.tool_calls:
+            name = tc.function.name
+            args = tc.function.arguments  # raw JSON string from the model
+
+            result_str, success, error = execute_tool(name, args)
+
+            # Track SQL generated by query_database for eval compatibility
+            if name == "query_database":
+                try:
+                    import json as _json
+                    parsed_args = _json.loads(args) if isinstance(args, str) else args
+                    last_sql = parsed_args.get("sql", "")
+                except Exception:
+                    pass
+
+            tool_calls_log.append({
+                "iteration": iteration + 1,
+                "tool": name,
+                "arguments": args,
+                "result": result_str[:500],  # truncate for logging
+                "success": success,
+                "error": error,
+            })
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result_str,
+            })
+
+    # Max iterations reached — return whatever we have
+    return (
+        "Max tool iterations reached without a final answer.",
+        last_sql,
+        tool_calls_log,
+        total_prompt_tokens,
+        total_completion_tokens,
+        total_cost,
+        iterations,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main agent function
 # ---------------------------------------------------------------------------
 
@@ -206,6 +337,45 @@ def generate_sql(
         strategy = PromptStrategy(decision.strategy)
         routed_difficulty = decision.difficulty
         router_method = decision.method
+
+    # Tool-use has its own loop — handle it separately before building prompts
+    if strategy == PromptStrategy.TOOL_USE:
+        start_time = time.time()
+        answer, sql, tool_calls_log, prompt_tokens, completion_tokens, cost, iterations = \
+            _run_tool_use_loop(question, model)
+        latency = time.time() - start_time
+
+        lf = get_client()
+        lf.update_current_span(
+            input=question,
+            output=answer,
+            metadata={
+                "model": model,
+                "strategy": strategy.value,
+                "tool_calls": tool_calls_log,
+                "iterations": iterations,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost": cost,
+                "latency": latency,
+            },
+        )
+        trace_id = lf.get_current_trace_id()
+
+        return AgentResult(
+            question=question,
+            sql=sql,
+            answer=answer,
+            tool_calls=tool_calls_log,
+            model=model,
+            strategy=strategy.value,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            trace_id=trace_id,
+            attempts=iterations,
+            cost=cost,
+            latency=latency,
+        )
 
     is_cot = strategy == PromptStrategy.CHAIN_OF_THOUGHT
 
