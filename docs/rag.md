@@ -1,99 +1,127 @@
 # RAG Infrastructure
 
-The RAG module (`src/rag/`) provides a configurable retrieval pipeline used by the `rag` schema-linking strategy, the `tool_use` agent's `search_knowledge_base` tool, and the retrieval benchmark scripts.
+The RAG module covers two distinct retrieval use cases:
 
-There are two distinct retrieval use cases in this project:
-
-| Use case | Source | Backend |
+| Use case | What gets retrieved | Implementation |
 |---|---|---|
-| **Schema linking** | 50 table definitions (4 core + 46 decoys) | Qdrant (dense + sparse + hybrid) |
-| **Knowledge base** | `datasets/docs/ecommerce_kb.md` (~6 KB) | InMemoryStore or ChromaDB |
+| **Schema linking** | Relevant table definitions from a 50-table pool | `src/agent/schema_retriever.py` — Qdrant with dense + sparse + hybrid |
+| **Knowledge base** | Relevant chunks from a 6 KB KB document | `src/rag/` — chunker + vector store + retriever |
+
+Both retrieve context at query time and inject it into the LLM prompt — keeping prompts focused and avoiding irrelevant noise.
 
 ---
 
 ## Schema linking — Qdrant hybrid search (`src/agent/schema_retriever.py`)
 
-Rather than passing all 50 table definitions to the model, the schema retriever embeds the question and retrieves only the most relevant tables — keeping prompts short and reducing confusion for smaller models.
+### The problem it solves
+
+The database schema has 50 table definitions (4 real + 46 decoy tables). Sending all 50 to the model on every request:
+- Wastes ~3,000 tokens per call
+- Confuses smaller models — they hallucinate columns from irrelevant tables
+- Produces wrong SQL on hard questions that require specific joins
+
+The schema retriever embeds the question and retrieves only the 3–5 most relevant tables. The model only sees those.
 
 ### Architecture
 
 ```
 Question
     │
-    ├─── dense embed (OpenAI) ──────────┐
-    │                                   │
-    └─── sparse embed (SPLADE) ─────────┤
-                                        ▼
-                               Qdrant in-memory
-                               (dual-vector collection)
-                                        │
-                              Reciprocal Rank Fusion
-                                        │
-                                        ▼
-                               top-K table definitions
+    ├── Dense embed (OpenAI or FastEmbed) ──────────┐
+    │                                                │
+    └── Sparse embed (SPLADE via FastEmbed) ─────────┤
+                                                     ▼
+                                          Qdrant in-memory
+                                       (dual-vector collection)
+                                                     │
+                                    Reciprocal Rank Fusion (RRF)
+                                                     │
+                                                     ▼
+                                        top-K table definitions
 ```
 
 ### Three retrieval strategies
 
 | Strategy | How it works | Best for |
 |---|---|---|
-| `rag_dense` | Cosine similarity on OpenAI embeddings | Semantic matches ("order history" → orders) |
-| `rag_sparse` | BM25/SPLADE lexical matching via FastEmbed | Exact keyword matches (column names, IDs) |
-| `rag_hybrid` | Reciprocal Rank Fusion of dense + sparse | Best overall — handles both cases |
+| `rag_dense` | Cosine similarity on embeddings | Semantic matches — "order history" → `orders` |
+| `rag_sparse` | BM25/SPLADE keyword matching (FastEmbed, local, zero cost) | Exact keyword matches — column names, IDs |
+| `rag_hybrid` | RRF fusion of dense + sparse | Best overall — handles both semantic and exact matches |
 
 ### Implementation
 
 ```python
 from src.agent.schema_retriever import retrieve_schema
 
-# Returns a formatted schema string + list of retrieved table defs
+# Returns (formatted_schema_string, list_of_retrieved_table_defs)
 schema_str, tables = retrieve_schema(
     question="Who are the top customers by revenue?",
     top_k=5,
-    retrieval_type="hybrid",  # "dense" | "sparse" | "hybrid"
+    retrieval_type="hybrid",   # "dense" | "sparse" | "hybrid"
 )
 ```
 
-The retriever is a singleton — the Qdrant collection is built once on first call and cached in memory for the lifetime of the process. Dense embeddings use `EMBEDDING_MODEL` env var (default: `openai/text-embedding-3-small`); sparse embeddings use SPLADE (`prithivida/Splade_PP_en_v1`) via FastEmbed (local, no API cost).
+The retriever is a **singleton**: the Qdrant collection is built once on first call, cached in memory, and reused for the lifetime of the process. Re-embedding 50 tables on every request would waste ~1–2s per call.
+
+- Dense embeddings use the `EMBEDDING_MODEL` env var (default: `openai/text-embedding-3-small`)
+- Sparse embeddings use SPLADE (`prithivida/Splade_PP_en_v1`) via FastEmbed — runs locally, no API call
+
+### Benchmark results
+
+From `scripts/benchmark_schema_retrieval.py` — 15 golden questions, 50 tables, top_k=5:
+
+| Strategy | Embedding | Library | Recall@5 | Avg query |
+|---|---|---|---|---|
+| sparse (BM25) | SPLADE | FastEmbed local | **1.000** | 27ms |
+| dense | bge-small-en-v1.5 | FastEmbed local | **1.000** | 21ms |
+| hybrid (RRF) | bge-small-en-v1.5 | FastEmbed local | **1.000** | 64ms |
+| dense | text-embedding-3-large | OpenAI API | **1.000** | 348ms |
+| dense | text-embedding-3-small | OpenAI API | 0.900 | 276ms |
+
+See [findings.md](findings.md) for the full results table and analysis.
 
 ### Why Qdrant?
 
-- **Native hybrid search** via `FusionQuery(fusion=Fusion.RRF)` — no custom fusion code needed
-- **Dual-vector collections** support dense + sparse in a single index
-- **In-memory mode** (`QdrantClient(":memory:")`) — zero infra for development
-- **Production path**: replace `:memory:` with a Qdrant server URL, same API
+- **Native hybrid search** via `FusionQuery(fusion=Fusion.RRF)` — no custom score merging needed
+- **Dual-vector collections** — dense and sparse in a single index, queried together
+- **In-memory mode** (`QdrantClient(":memory:")`) — zero infrastructure for development
+- **Production path**: replace `:memory:` with a Qdrant server URL, exact same API
 
 ---
 
 ## Knowledge base retrieval — chunked RAG (`src/rag/`)
 
-The `src/rag/` module handles document-level retrieval for the `search_knowledge_base` tool and the RAG benchmark. Unlike schema retrieval (already one-liner table defs), knowledge base documents require actual chunking.
+The `src/rag/` module handles document-level retrieval for the `search_knowledge_base` tool in the `tool_use` agent and the KB benchmark.
+
+Unlike schema retrieval (one-liner table definitions, already chunked), the knowledge base is a multi-section prose document that needs to be split into embeddable units before indexing.
 
 ### Architecture
 
 ```
-Document(s)
+Document file
     │
     ▼
-Chunker          — splits text into embeddable units
+Chunker       — splits text into embeddable units (by char, sentence, or line)
     │
     ▼
-VectorStore      — embeds and stores chunks; queries by similarity
+VectorStore   — embeds each chunk and stores it; queries by cosine similarity
     │
     ▼
-DocumentRetriever — public interface composing chunker + store
+DocumentRetriever — public API: index_file() + retrieve() + retrieve_text()
     │
     ▼
-top-K chunks     — injected into LLM prompt as context
+top-K chunks  — injected into LLM prompt as context
 ```
 
-### Chunking (`src/rag/chunker.py`)
+### Chunking strategies (`src/rag/chunker.py`)
 
-| Strategy | How it splits | Best for |
+| Chunker | How it splits | When to use |
 |---|---|---|
-| `FixedSizeChunker` | Character count with configurable overlap | Fast baseline, language-agnostic |
-| `SentenceChunker` | Groups complete sentences up to max character limit | Prose documents (FAQs, policies, transcripts) |
-| `SchemaChunker` | One chunk per line (table definition) | Structured schema documents |
+| `FixedSizeChunker(chunk_size, overlap)` | Splits every N characters with M-character overlap | Fast baseline; language-agnostic; good for dense prose |
+| `SentenceChunker(max_chunk_size, overlap_sentences)` | Groups complete sentences until max_chunk_size, with sentence overlap | Prose documents (FAQs, policies, transcripts) — preserves sentence meaning |
+| `SchemaChunker()` | One chunk per line | Schema/table definitions — used implicitly in `schema_retriever.py` |
+
+**Why overlap matters:** a key phrase like "30-day return window" might be split across two fixed-size chunks if you're unlucky. Overlap ensures each boundary is also covered by the adjacent chunk. `FixedSizeChunker` overlaps by characters; `SentenceChunker` by sentence count.
 
 ```python
 from src.rag.chunker import SentenceChunker
@@ -101,16 +129,30 @@ from src.rag.chunker import SentenceChunker
 chunks = SentenceChunker(max_chunk_size=512, overlap_sentences=1).chunk(
     text, metadata={"source": "return_policy.md"}
 )
+# Returns list[Chunk] — each with .text and .metadata
 ```
 
 ### Vector stores (`src/rag/vector_store.py`)
 
-Both implementations share the same `VectorStore` abstract interface (`add`, `query`, `reset`, `count`).
+Both stores implement the same abstract interface: `add(chunks)`, `query(question, top_k)`, `reset()`, `count()`. Callers never need to know which backend is in use.
 
-| Store | Persistence | Query time | Best for |
+| Store | Persistence | Query algorithm | When to use |
 |---|---|---|---|
-| `InMemoryStore` | None (lost on restart) | O(n) linear scan | Tests, small corpora, quick prototyping |
-| `ChromaDBStore` | Disk (HNSW index, survives restarts) | O(log n) | Production, large corpora, multi-process |
+| `InMemoryStore` | None — lost on restart | O(n) linear scan | Tests, small corpora, quick prototyping |
+| `ChromaDBStore` | Disk (HNSW index, survives restarts) | Approximate nearest neighbor | Production, large corpora, multi-process deployments |
+
+Embeddings are generated by the same `get_embeddings()` helper in both stores, controlled by the `EMBEDDING_MODEL` env var. To swap models, change the env var — no code changes needed.
+
+```python
+from src.rag.vector_store import create_store
+
+store = create_store("chroma", collection_name="kb_docs", persist_dir="./chroma_db")
+# or: create_store("memory")
+```
+
+### DocumentRetriever (`src/rag/retriever.py`)
+
+The public interface. Composes a chunker and a store.
 
 ```python
 from src.rag.retriever import build_retriever
@@ -122,83 +164,93 @@ retriever = build_retriever(
     overlap=1,
     top_k=5,
 )
+
 retriever.index_file("datasets/docs/ecommerce_kb.md")
+
+# Returns formatted string — ready to inject into an LLM prompt
 context = retriever.retrieve_text("what is the return policy?", top_k=3)
+
+# Returns RetrievedChunk objects with score + metadata
+results = retriever.retrieve("return policy", top_k=3)
+for r in results:
+    print(r.score, r.chunk.metadata["source"], r.chunk.text[:80])
 ```
 
-### Knowledge base
+### Knowledge base document
 
-`datasets/docs/ecommerce_kb.md` — a 6 KB realistic knowledge base covering returns, shipping, payments, account management, and customer support. Indexed automatically by the `search_knowledge_base` tool and the KB benchmark.
+`datasets/docs/ecommerce_kb.md` — a 6 KB realistic knowledge base covering:
+- Returns and refunds (30-day window, digital product exclusions, refund timeline)
+- Shipping and delivery (free shipping threshold, carriers, delivery estimates)
+- Payment methods (Visa, Mastercard, PayPal, etc.)
+- Product inventory and availability policies
+- Customer account management
+- Customer support hours and contact channels
+
+This is the document the `search_knowledge_base` tool retrieves from. It is indexed automatically on first tool call (module-level singleton in `tools.py`).
 
 ---
 
-## Benchmarks
+## KB retrieval benchmark (`scripts/benchmark_rag.py`)
 
-### KB retrieval benchmark (`scripts/benchmark_rag.py`)
-
-Sweeps chunking strategies × vector stores × top-K. Measures `recall@K` on 8 eval questions about the knowledge base.
+Sweeps chunking strategies × vector stores × top-K values on 8 knowledge base eval questions. Measures `recall@K` — whether the required answer phrase appeared in any of the top-K retrieved chunks.
 
 ```bash
 # Default sweep: sentence + fixed chunkers, memory store, top_k 3 and 5
 python scripts/benchmark_rag.py
 
-# Full sweep including ChromaDB
+# Include ChromaDB and schema chunker
 python scripts/benchmark_rag.py --chunker sentence fixed schema --store memory chroma --top-k 1 3 5 10
+
+# Single config
+python scripts/benchmark_rag.py --chunker sentence --store memory --top-k 5
 ```
 
-### Schema retrieval benchmark (`scripts/benchmark_schema_retrieval.py`)
+On the clean KB document, `SentenceChunker` at top_k≥5 achieves perfect 1.000 recall. The real differentiation appears at scale with noisy documents.
 
-Comprehensive comparison of vector DB backends, embedding models, and retrieval strategies on the schema linking task (50 tables → retrieve required tables given a natural language question).
+---
+
+## Schema retrieval benchmark (`scripts/benchmark_schema_retrieval.py`)
+
+Comprehensive comparison of all three backends × two embedding libraries × three strategies on schema linking. See [findings.md](findings.md) for full results.
 
 ```bash
-# Full sweep (all backends × models × top-k values)
+# Full sweep — all combinations
 python scripts/benchmark_schema_retrieval.py
 
-# Quick qdrant-only comparison
-python scripts/benchmark_schema_retrieval.py --backend qdrant --top-k 5
-
-# Compare dense vs hybrid with a single embedding model
+# Quick: local-only models, single top-k (no API cost)
 python scripts/benchmark_schema_retrieval.py \
-    --strategy dense hybrid \
-    --embedding openai/text-embedding-3-small \
-    --top-k 3 5 10
+    --embedding fastembed/BAAI/bge-small-en-v1.5 fastembed/nomic-ai/nomic-embed-text-v1.5 \
+    --top-k 5
+
+# Qdrant only, all strategies
+python scripts/benchmark_schema_retrieval.py --backend qdrant --top-k 5
 ```
 
-**What it measures:**
-- `Recall@K` — fraction of required tables retrieved (partial credit per question)
-- `Perfect@K` — fraction of questions where ALL required tables were in top-K
-- Index time, avg query latency, estimated API cost
+**Embedding models supported:**
 
-**Configurations compared:**
+| Key | Library | Dims | Cost |
+|---|---|---|---|
+| `openai/text-embedding-3-small` | LiteLLM/OpenAI API | 1536 | ~$0.00002/run |
+| `openai/text-embedding-3-large` | LiteLLM/OpenAI API | 3072 | ~$0.00013/run |
+| `fastembed/BAAI/bge-small-en-v1.5` | FastEmbed local | 384 | free |
+| `fastembed/nomic-ai/nomic-embed-text-v1.5` | FastEmbed local | 768 | free |
 
-| Backend | Strategy | Embedding |
-|---|---|---|
-| Qdrant | dense | text-embedding-3-small |
-| Qdrant | dense | text-embedding-3-large |
-| Qdrant | sparse (BM25) | SPLADE (local, no API) |
-| Qdrant | hybrid (RRF) | text-embedding-3-small |
-| Qdrant | hybrid (RRF) | text-embedding-3-large |
-| InMemoryStore | dense | text-embedding-3-small |
-| InMemoryStore | dense | text-embedding-3-large |
-| ChromaDB | dense | text-embedding-3-small |
-| ChromaDB | dense | text-embedding-3-large |
-
-**Why these combinations?** Sparse/BM25 is only available in Qdrant (via FastEmbed SPLADE). InMemoryStore and ChromaDB support dense-only through the shared `get_embeddings()` helper. Hybrid combines the best of both worlds and is the recommended production strategy.
+FastEmbed models are downloaded from HuggingFace on first use (~90–275 MB each) and cached locally. All subsequent runs are offline.
 
 ---
 
 ## Choosing a vector DB for production
 
-| DB | Hosting | Hybrid search | Notes |
+| DB | Hosting | Hybrid search | When to choose |
 |---|---|---|---|
-| Qdrant | Self-hosted or managed | ✅ native RRF | Best performance for this use case |
-| ChromaDB | Self-hosted | ❌ dense only | Easy to operate, no external service |
-| pgvector | Postgres extension | Partial (pgvector + pg_bm25) | No extra infra if you already use Postgres |
-| Pinecone | Fully managed | ✅ | Serverless pricing, no ops |
-| Weaviate | Self-hosted or managed | ✅ BM25 + dense | Strong for structured metadata filtering |
+| Qdrant | Self-hosted or managed (qdrant.tech) | ✅ native RRF | Best default — strong performance, great Python client, BM25 built-in |
+| ChromaDB | Self-hosted | ❌ dense only | Easiest to operate; no external service needed; good for < 100K chunks |
+| pgvector | Postgres extension | Partial (requires pg_bm25) | No extra infra if you already use Postgres |
+| Pinecone | Fully managed | ✅ hybrid available | Serverless pricing; no ops burden; good for bursty workloads |
+| Weaviate | Self-hosted or managed | ✅ BM25 + dense | Strong metadata filtering; good for structured + unstructured data |
 
-For this project, Qdrant was chosen because:
-1. Native Python client with first-class support for dual-vector collections
-2. Hybrid RRF is built-in — no custom score merging needed
-3. `:memory:` mode eliminates all infra for development
-4. FastEmbed integration allows sparse embeddings without an API call
+For this project, **Qdrant** was chosen because:
+1. Native dual-vector collections (dense + sparse in one index)
+2. RRF fusion is built-in — no custom score merging code
+3. `:memory:` mode eliminates all infrastructure for development
+4. FastEmbed provides SPLADE sparse embeddings with no API call
