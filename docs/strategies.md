@@ -1,6 +1,6 @@
 # Prompt strategies
 
-Five strategies are available, controlling what context is prepended to the prompt before the schema and question:
+Seven strategies are available:
 
 | Strategy | Description | Extra cost |
 |---|---|---|
@@ -10,8 +10,11 @@ Five strategies are available, controlling what context is prepended to the prom
 | `chain_of_thought` | Instructs the model to reason step-by-step before writing SQL | none (larger output) |
 | `rag` | Embeds the question and retrieves the top-K most semantically relevant table definitions from the 50-table DWH, rather than sending the full schema | 1 embedding call |
 | `routed` | Classifies question difficulty (rule-based → embedding k-NN), then resolves to best model + strategy | see [routing.md](routing.md) |
+| `tool_use` | Agentic: the LLM is given tools (`query_database`, `search_knowledge_base`, `get_schema`) and decides which to call. Handles SQL, policy, and hybrid questions in a single interface. | multiple LLM round-trips |
 
-**Recommended strategy: `few_shot_dynamic`** — +40% result_match vs zero_shot, only +4s latency.
+**Recommended strategy for pure SQL:** `few_shot_dynamic` — +40% result_match vs zero_shot, only +4s latency.
+
+**Recommended strategy for general assistant (SQL + policies):** `tool_use` — see [tool-use.md](tool-use.md).
 
 ## RAG schema linking (`rag` strategy)
 

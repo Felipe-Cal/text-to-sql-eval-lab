@@ -113,13 +113,15 @@ pytest
 
 | Topic | Doc |
 |---|---|
-| Prompt strategies (zero_shot, few_shot_dynamic, rag, etc.) | [docs/strategies.md](docs/strategies.md) |
+| Prompt strategies (zero_shot, few_shot_dynamic, rag, tool_use, etc.) | [docs/strategies.md](docs/strategies.md) |
+| Tool-use agent (agentic SQL + KB search) | [docs/tool-use.md](docs/tool-use.md) |
+| RAG infrastructure (chunking, vector stores, benchmark) | [docs/rag.md](docs/rag.md) |
 | FastAPI endpoints (`/query`, `/evals/run`) | [docs/api.md](docs/api.md) |
 | Fine-tuning Llama 3.1 8B with LoRA | [docs/fine-tuning.md](docs/fine-tuning.md) |
 | Model router (difficulty classification) | [docs/routing.md](docs/routing.md) |
 | DSPy prompt optimization | [docs/dspy.md](docs/dspy.md) |
 | Evals-as-CI (GitHub Actions gate) | [docs/evals-ci.md](docs/evals-ci.md) |
-| Guardrails (input/output, adversarial tests) | [docs/guardrails.md](docs/guardrails.md) |
+| Guardrails (input/output/execution, adversarial tests) | [docs/guardrails.md](docs/guardrails.md) |
 | Experimental findings and benchmark results | [docs/findings.md](docs/findings.md) |
 
 ---
@@ -136,19 +138,29 @@ text-to-sql-eval-lab/
 │   └── dspy_optimized_prompt.json   # output of optimize_prompt.py
 ├── docs/                            # detailed documentation
 ├── notebooks/finetune_llama.ipynb   # Colab LoRA fine-tuning notebook
+├── datasets/
+│   ├── docs/ecommerce_kb.md         # Knowledge base for tool_use + RAG
+│   └── golden/policy_questions.json # 10 policy/hybrid questions for tool_use eval
 ├── scripts/
 │   ├── run_eval.py                  # CLI eval runner
 │   ├── generate_synthetic.py        # synthetic data flywheel
 │   ├── optimize_prompt.py           # DSPy BootstrapFewShot optimizer
 │   ├── ci_eval.py                   # CI gate script
 │   ├── benchmark_routing.py         # routing vs. fixed-strategy comparison
+│   ├── benchmark_rag.py             # RAG chunking × vector store × top-K sweep
+│   ├── benchmark_agent.py           # zero_shot vs few_shot_dynamic vs tool_use
 │   └── prepare_finetune_data.py     # data prep for LoRA fine-tuning
 ├── src/
 │   ├── api/                         # FastAPI service
-│   ├── agent/                       # LLM call, strategies, few-shot, RAG, router
+│   ├── agent/                       # LLM call, strategies, tools, router
+│   │   └── tools.py                 # query_database, search_kb, get_schema tools
+│   ├── rag/                         # RAG infrastructure
+│   │   ├── chunker.py               # FixedSize, Sentence, Schema chunkers
+│   │   ├── vector_store.py          # InMemoryStore + ChromaDBStore
+│   │   └── retriever.py             # DocumentRetriever (chunker + store)
 │   ├── evals/                       # Inspect AI tasks and scorers
-│   ├── guardrails/                  # input + output guardrails
-│   └── utils/db.py                  # DuckDB connection and seeding
+│   ├── guardrails/                  # input + output + execution guardrails
+│   └── utils/db.py                  # DuckDB connection (read-only for queries)
 └── tests/                           # pytest — guardrails + adversarial
 ```
 
@@ -161,8 +173,9 @@ text-to-sql-eval-lab/
 | [fastapi](https://fastapi.tiangolo.com) | HTTP service layer |
 | [inspect-ai](https://inspect.ai) | Eval harness — tasks, solvers, scorers, logging |
 | [litellm](https://docs.litellm.ai) | Unified interface to OpenAI, Anthropic, and other providers |
-| [instructor](https://python.useinstructor.com) | Structured outputs leveraging Pydantic schemas (replaces brittle JSON parsing in evaluation) |
-| [langgraph](https://langchain-ai.github.io/langgraph/) | Agentic orchestration (used for robust StateGraph retry loops) |
+| [instructor](https://python.useinstructor.com) | Structured outputs via Pydantic schemas — used in `semantic_judge` to replace brittle JSON parsing |
+| [langgraph](https://langchain-ai.github.io/langgraph/) | StateGraph orchestration for the self-correction retry loop in `generate_sql` |
+| [chromadb](https://docs.trychroma.com) | Persistent vector store for the RAG module (alternative to in-memory cosine similarity) |
 | [duckdb](https://duckdb.org) | In-process SQL engine |
 | [sqlglot](https://github.com/tobymao/sqlglot) | SQL parser for syntax validation and output guardrails |
 | [dspy-ai](https://dspy.ai) | Prompt optimization |
