@@ -19,6 +19,7 @@ dependencies = [
     "chromadb>=1.0.0",
     "google-genai",
     "instructor>=1.2.0",
+    "langgraph>=0.0.30",
 ]
 
 [project.optional-dependencies]

@@ -28,9 +28,12 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TypedDict, Annotated, Sequence
+import operator
 
 import litellm
 from dotenv import load_dotenv
+from langgraph.graph import StateGraph, END
 from langfuse import get_client, observe
 
 from src.agent.few_shot import Example, get_dynamic_examples, get_static_examples
@@ -453,53 +456,119 @@ def generate_sql(
                 if "cost" in interaction and interaction["cost"]:
                     total_cost += float(interaction["cost"])
     else:
-        for attempt in range(max_retries):
+        class AgentState(TypedDict):
+            messages: list[dict]
+            model: str
+            is_cot: bool
+            max_retries: int
+            attempt: int
+            sql: str
+            raw_output: str
+            reasoning: str | None
+            error: str | None
+            prompt_tokens: int
+            completion_tokens: int
+            cost: float
+
+        def generate_node(state: AgentState):
             response = litellm.completion(
-                model=model,
-                messages=messages,
-                temperature=0,         # deterministic output for eval reproducibility
-                max_tokens=1024 if is_cot else 512,  # CoT needs room for the reasoning
+                model=state["model"],
+                messages=state["messages"],
+                temperature=0,
+                max_tokens=1024 if state["is_cot"] else 512,
             )
-    
-            total_prompt_tokens += response.usage.prompt_tokens
-            total_completion_tokens += response.usage.completion_tokens
             
+            p_tokens = response.usage.prompt_tokens or 0
+            c_tokens = response.usage.completion_tokens or 0
+            call_cost = 0.0
             try:
-                cost = litellm.completion_cost(completion_response=response)
-                if cost:
-                    total_cost += cost
+                c = litellm.completion_cost(completion_response=response)
+                if c: call_cost = float(c)
             except Exception:
                 pass
-    
+                
             raw = response.choices[0].message.content or ""
-            sql = extract_sql(raw)
-            reasoning = _extract_reasoning(raw) if is_cot else None
+            extracted_sql = extract_sql(raw)
+            rsn = _extract_reasoning(raw) if state["is_cot"] else None
             
-            # If the model didn't output SQL, ask again
-            if not sql:
-                if attempt < max_retries - 1:
-                    messages.append({"role": "assistant", "content": raw})
-                    messages.append({"role": "user", "content": "You didn't output any valid SQL query. Please provide a SQL query."})
-                    continue
-                else:
-                    break
-                    
-            # Try to execute the SQL against our DuckDB sandbox
+            new_messages = state["messages"].copy()
+            new_messages.append({"role": "assistant", "content": raw})
+            
+            return {
+                "messages": new_messages,
+                "sql": extracted_sql,
+                "raw_output": raw,
+                "reasoning": rsn,
+                "attempt": state["attempt"] + 1,
+                "prompt_tokens": state["prompt_tokens"] + p_tokens,
+                "completion_tokens": state["completion_tokens"] + c_tokens,
+                "cost": state["cost"] + call_cost
+            }
+
+        def execute_node(state: AgentState):
+            current_sql = state["sql"]
+            if not current_sql:
+                error_msg = "You didn't output any valid SQL query. Please provide a SQL query."
+                new_msgs = state["messages"].copy()
+                new_msgs.append({"role": "user", "content": error_msg})
+                return {"error": error_msg, "messages": new_msgs}
+                
             try:
-                execute_query(sql)
-                # If we get here, it executed without error! We have successful SQL.
-                break
+                execute_query(current_sql)
+                return {"error": None}
             except Exception as e:
-                # It failed to execute. If we have retries left, feed the error back!
-                if attempt < max_retries - 1:
-                    messages.append({"role": "assistant", "content": raw})
-                    messages.append({
-                        "role": "user", 
-                        "content": f"The SQL query resulted in an error when executed in DuckDB:\n{str(e)}\n\nPlease fix the query and try again."
-                    })
-                else:
-                    # Give up on the last attempt
-                    break
+                error_msg = f"The SQL query resulted in an error when executed in DuckDB:\n{str(e)}\n\nPlease fix the query and try again."
+                new_msgs = state["messages"].copy()
+                new_msgs.append({"role": "user", "content": error_msg})
+                return {"error": error_msg, "messages": new_msgs}
+
+        def route_after_execute(state: AgentState):
+            if not state["error"]:
+                return END
+            if state["attempt"] >= state["max_retries"]:
+                return END
+            return "generate_node"
+
+        workflow = StateGraph(AgentState)
+        workflow.add_node("generate_node", generate_node)
+        workflow.add_node("execute_node", execute_node)
+        
+        workflow.set_entry_point("generate_node")
+        workflow.add_edge("generate_node", "execute_node")
+        workflow.add_conditional_edges(
+            "execute_node",
+            route_after_execute,
+            {
+                "generate_node": "generate_node",
+                END: END
+            }
+        )
+        
+        app = workflow.compile()
+        
+        initial_state = {
+            "messages": messages,
+            "model": model,
+            "is_cot": is_cot,
+            "max_retries": max_retries,
+            "attempt": 0,
+            "sql": "",
+            "raw_output": "",
+            "reasoning": None,
+            "error": None,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cost": 0.0
+        }
+        
+        final_state = app.invoke(initial_state)
+        
+        total_prompt_tokens = final_state["prompt_tokens"]
+        total_completion_tokens = final_state["completion_tokens"]
+        total_cost = final_state["cost"]
+        sql = final_state["sql"]
+        reasoning = final_state["reasoning"]
+        attempt = final_state["attempt"] - 1
 
     end_time = time.time()
     latency = end_time - start_time
