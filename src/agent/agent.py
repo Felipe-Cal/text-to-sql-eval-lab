@@ -331,6 +331,7 @@ def generate_sql(
         max_retries: Number of attempts to successfully execute the SQL.
     """
     model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
+    strategy = PromptStrategy(strategy) if isinstance(strategy, str) else strategy
 
     # Routing: classify difficulty and pick the best model + strategy automatically.
     # The resolved strategy replaces ROUTED for all subsequent logic.

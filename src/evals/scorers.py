@@ -27,6 +27,10 @@ from inspect_ai.scorer import Score, Scorer, Target, accuracy, mean, scorer
 from inspect_ai.solver import TaskState
 from langfuse import get_client
 
+from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric, GEval
+from deepeval.test_case import LLMTestCase, LLMTestCaseParams
+from deepeval.models import GPTModel # DeepEval's default, we can wrap LiteLLM if needed
+
 from src.utils.db import execute_query
 
 
@@ -454,3 +458,96 @@ def retrieval_recall() -> Scorer:
         return Score(value=ratio, explanation=f"Found {found}/{len(required_tables)} golden tables in top-K")
 
     return score
+
+
+# ---------------------------------------------------------------------------
+# Scorer 7: DeepEval Diagnostic Metrics
+# ---------------------------------------------------------------------------
+
+@scorer(metrics=[mean()])
+def faithfulness_score() -> Scorer:
+    """
+    Measures how well the generated SQL/Reasoning is grounded in the retrieved schema.
+    Uses DeepEval's FaithfulnessMetric.
+    """
+    async def score(state: TaskState, target: Target) -> Score:
+        generated_sql = state.output.completion
+        retrieved_context = state.metadata.get("retrieved_tables", [])
+        
+        if not retrieved_context:
+            # If no RAG was used, faithfulness is trivially 1.0 (or we skip)
+            return Score(value=1.0, explanation="No RAG context to verify faithfulness against.")
+
+        test_case = LLMTestCase(
+            input=state.input_text,
+            actual_output=generated_sql,
+            retrieval_context=retrieved_context
+        )
+        
+        metric = FaithfulnessMetric(threshold=0.5)
+        # DeepEval 2026/late 2s uses synchronous measure mostly in these versions, 
+        # or we can use async if available. For now, running sync is safe in this harness.
+        metric.measure(test_case)
+        
+        val = float(metric.score)
+        reason = metric.reason
+        
+        _push_langfuse_score(state, "faithfulness", val)
+        return Score(value=val, explanation=reason)
+
+    return score
+
+
+@scorer(metrics=[mean()])
+def answer_relevancy_score() -> Scorer:
+    """
+    Measures if the SQL truly addresses the prompt's intent.
+    Uses DeepEval's AnswerRelevancyMetric.
+    """
+    async def score(state: TaskState, target: Target) -> Score:
+        test_case = LLMTestCase(
+            input=state.input_text,
+            actual_output=state.output.completion,
+            retrieval_context=state.metadata.get("retrieved_tables", [])
+        )
+        
+        metric = AnswerRelevancyMetric(threshold=0.5)
+        metric.measure(test_case)
+        
+        val = float(metric.score)
+        reason = metric.reason
+        
+        _push_langfuse_score(state, "answer_relevancy", val)
+        return Score(value=val, explanation=reason)
+
+    return score
+
+
+@scorer(metrics=[mean()])
+def sql_quality_geval() -> Scorer:
+    """
+    Uses DeepEval's G-Eval to score SQL 'elegance' and 'optimization'.
+    Rubric: Correctness, Efficiency (no redundant JOINs), Readability.
+    """
+    async def score(state: TaskState, target: Target) -> Score:
+        quality_metric = GEval(
+            name="SQL Quality",
+            criteria="Determine if the SQL is efficient, readable, and follows best practices (e.g., using window functions correctly, descriptive aliases, no redundant joins).",
+            evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
+            threshold=0.5,
+        )
+        
+        test_case = LLMTestCase(
+            input=state.input_text,
+            actual_output=state.output.completion
+        )
+        
+        quality_metric.measure(test_case)
+        val = float(quality_metric.score)
+        reason = quality_metric.reason
+        
+        _push_langfuse_score(state, "sql_quality", val)
+        return Score(value=val, explanation=reason)
+
+    return score
+

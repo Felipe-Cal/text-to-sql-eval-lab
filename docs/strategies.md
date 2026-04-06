@@ -39,6 +39,16 @@ We utilize a **Directed Acyclic Graph (DAG)** to orchestrate a deterministic sel
 
 This strict State Machine approach guarantees idempotency and isolates generation from logic loops—skills heavily utilized in Staff-level Agent designs.
 
+## Formal Diagnostic Evaluation (DeepEval)
+
+Beyond the binary `result_match` scorer, we utilize **DeepEval** to provide high-fidelity diagnostics for every SQL generation. These metrics use **LLM-as-a-Judge** with specialized reasoning to pinpoint failure modes:
+
+*   **Faithfulness**: Quantifies how well the generated SQL is grounded in the retrieved schema. Detects if the model "hallucinated" a table or column name (Scale 0-1).
+*   **Answer Relevancy**: Measures the alignment between the user's natural language question and the generated SQL's intent.
+*   **SQL Quality (G-Eval)**: A custom rubric-based metric that scores the "Staff-level" quality of the SQL, rewarding efficient JOINs, window functions, and clean aliasing.
+
+These metrics are essential for establishing a production "Refusal & Hallucination" baseline before deployment.
+
 ## Running a strategy sweep
 
 ```bash

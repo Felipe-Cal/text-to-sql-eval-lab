@@ -21,6 +21,7 @@ dependencies = [
     "google-genai",
     "instructor>=1.2.0",
     "langgraph>=0.0.30",
+    "deepeval>=0.20.0",
 ]
 
 [project.optional-dependencies]

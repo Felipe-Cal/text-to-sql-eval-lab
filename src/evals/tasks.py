@@ -21,7 +21,11 @@ from inspect_ai.scorer import mean
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
 from src.agent.agent import PromptStrategy, extract_sql, generate_sql
-from src.evals.scorers import avg_attempts, avg_cost, avg_latency, avg_total_tokens, avg_tool_calls, retrieval_recall, execution_ok, result_match, semantic_judge, syntax_valid
+from src.evals.scorers import (
+    avg_attempts, avg_cost, avg_latency, avg_total_tokens, avg_tool_calls, 
+    retrieval_recall, execution_ok, result_match, semantic_judge, syntax_valid,
+    faithfulness_score, answer_relevancy_score, sql_quality_geval
+)
 from src.utils.db import get_schema_string
 
 GOLDEN_PATH = Path(__file__).parent.parent.parent / "datasets" / "golden" / "questions.json"
@@ -152,5 +156,8 @@ def text_to_sql(
             avg_latency(),
             avg_total_tokens(),
             retrieval_recall(),
+            faithfulness_score(),
+            answer_relevancy_score(),
+            sql_quality_geval(),
         ],
     )

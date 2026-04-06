@@ -115,7 +115,7 @@ pytest
 |---|---|
 | Prompt strategies (zero_shot, few_shot_dynamic, rag, tool_use, etc.) | [docs/strategies.md](docs/strategies.md) |
 | Tool-use agent (agentic SQL + KB search) | [docs/tool-use.md](docs/tool-use.md) |
-| RAG infrastructure (chunking, vector stores, benchmark) | [docs/rag.md](docs/rag.md) |
+| RAG infrastructure (chunking, vector stores, Qdrant hybrid search, benchmark) | [docs/rag.md](docs/rag.md) |
 | FastAPI endpoints (`/query`, `/evals/run`) | [docs/api.md](docs/api.md) |
 | Fine-tuning Llama 3.1 8B with LoRA | [docs/fine-tuning.md](docs/fine-tuning.md) |
 | Model router (difficulty classification) | [docs/routing.md](docs/routing.md) |
@@ -147,7 +147,8 @@ text-to-sql-eval-lab/
 │   ├── optimize_prompt.py           # DSPy BootstrapFewShot optimizer
 │   ├── ci_eval.py                   # CI gate script
 │   ├── benchmark_routing.py         # routing vs. fixed-strategy comparison
-│   ├── benchmark_rag.py             # RAG chunking × vector store × top-K sweep
+│   ├── benchmark_rag.py             # RAG chunking × vector store × top-K sweep (KB docs)
+│   ├── benchmark_schema_retrieval.py # schema linking: Qdrant vs ChromaDB vs InMemory × embeddings
 │   ├── benchmark_agent.py           # zero_shot vs few_shot_dynamic vs tool_use
 │   └── prepare_finetune_data.py     # data prep for LoRA fine-tuning
 ├── src/
@@ -176,6 +177,7 @@ text-to-sql-eval-lab/
 | [instructor](https://python.useinstructor.com) | Structured outputs via Pydantic schemas — used in `semantic_judge` to replace brittle JSON parsing |
 | [langgraph](https://langchain-ai.github.io/langgraph/) | State-Machine orchestration for the self-correction retry loop in `generate_sql` |
 | [qdrant-client](https://qdrant.tech) / [fastembed](https://qdrant.github.io/fastembed/) | Hybrid Search (Dense + Sparse/BM25) for high-accuracy schema retrieval |
+| [deepeval](https://deepeval.com/) | Formal LLM evaluation framework used for diagnostic scorers (Faithfulness, Relevancy, G-Eval) |
 | [duckdb](https://duckdb.org) | In-process SQL engine |
 | [sqlglot](https://github.com/tobymao/sqlglot) | SQL parser for syntax validation and output guardrails |
 | [dspy-ai](https://dspy.ai) | Prompt optimization |
