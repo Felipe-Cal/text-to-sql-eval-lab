@@ -1,0 +1,77 @@
+[
+  {
+    "id": "p01",
+    "type": "policy",
+    "question": "What is the return policy and how long do refunds take to process?",
+    "expected_keywords": ["30 days", "5 to 7 business days", "original condition"],
+    "notes": "Pure KB question — requires search_knowledge_base only"
+  },
+  {
+    "id": "p02",
+    "type": "policy",
+    "question": "What payment methods does the company accept?",
+    "expected_keywords": ["PayPal", "Visa", "Mastercard", "Apple Pay"],
+    "notes": "Pure KB question — payment methods from policy doc"
+  },
+  {
+    "id": "p03",
+    "type": "policy",
+    "question": "How do I contact customer support and what are the opening hours?",
+    "expected_keywords": ["support@example.com", "Monday", "Friday", "8 AM"],
+    "notes": "Pure KB question — support contact details"
+  },
+  {
+    "id": "p04",
+    "type": "policy",
+    "question": "Do I get free shipping and what are the conditions?",
+    "expected_keywords": ["$50", "free standard shipping", "domestic"],
+    "notes": "Pure KB question — shipping policy"
+  },
+  {
+    "id": "p05",
+    "type": "policy",
+    "question": "Can I return a digital product or downloadable software?",
+    "expected_keywords": ["non-refundable", "Digital products"],
+    "notes": "Pure KB question — digital product return exclusion"
+  },
+  {
+    "id": "h01",
+    "type": "hybrid",
+    "question": "How many orders have been cancelled and what is the cancellation policy?",
+    "expected_keywords": ["cancelled", "cancel", "refund"],
+    "expected_data_hint": "Should include a count of cancelled orders from the database",
+    "notes": "Hybrid — needs query_database for count + search_knowledge_base for policy"
+  },
+  {
+    "id": "h02",
+    "type": "hybrid",
+    "question": "Who are our top 3 customers by total spend and how should they contact support for priority service?",
+    "expected_keywords": ["support", "Premium", "priority", "account manager"],
+    "expected_data_hint": "Should name the top 3 customers with their spend amounts",
+    "notes": "Hybrid — needs query_database for top customers + search_knowledge_base for support tiers"
+  },
+  {
+    "id": "h03",
+    "type": "hybrid",
+    "question": "What is our total revenue from completed orders, and what payment methods do customers use to pay?",
+    "expected_keywords": ["PayPal", "Visa", "credit card"],
+    "expected_data_hint": "Should include total revenue figure from database",
+    "notes": "Hybrid — revenue from DB + payment methods from KB"
+  },
+  {
+    "id": "h04",
+    "type": "hybrid",
+    "question": "How many customers have never placed a completed order, and what can we offer them to encourage their first purchase?",
+    "expected_keywords": ["free shipping", "discount"],
+    "expected_data_hint": "Should include count of customers with no completed orders",
+    "notes": "Hybrid — anti-join SQL query + KB context on promotions/shipping"
+  },
+  {
+    "id": "h05",
+    "type": "hybrid",
+    "question": "What products do we sell and what is the return policy if a customer is not satisfied?",
+    "expected_keywords": ["30 days", "original condition", "return"],
+    "expected_data_hint": "Should list product categories or products from database",
+    "notes": "Hybrid — product list from DB + return policy from KB"
+  }
+]

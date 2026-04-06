@@ -1,215 +1,135 @@
 [
   {
-    "question": "What percentage of total revenue comes from customers outside the USA?",
-    "sql": "SELECT (SUM(CASE WHEN c.country <> 'USA' THEN oi.quantity * oi.unit_price ELSE 0 END) / SUM(oi.quantity * oi.unit_price)) * 100 AS percentage_outside_usa FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed'",
+    "question": "Find the top 5 customers by total spending in the last year.",
+    "sql": "SELECT c.id, c.name, SUM(oi.quantity * oi.unit_price) AS total_spent FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.order_date >= DATE '2022-01-01' AND o.status = 'completed' GROUP BY c.id, c.name ORDER BY total_spent DESC LIMIT 5",
     "difficulty": "hard",
-    "notes": "Calculating percentage with conditional aggregation",
+    "notes": "Subquery with date filtering and aggregation",
     "expected_rows": [
       [
-        51.39
+        1,
+        "Alice Martin",
+        599.92
+      ],
+      [
+        2,
+        "Bob Schmidt",
+        384.92
+      ],
+      [
+        4,
+        "David Chen",
+        114.98
+      ],
+      [
+        7,
+        "Grace Kim",
+        99.96
+      ],
+      [
+        6,
+        "Frank M\u00fcller",
+        89.99
       ]
     ],
-    "id": "sq025"
+    "id": "sq021"
   },
   {
-    "question": "What is the percentage of completed orders compared to total orders for each country?",
-    "sql": "SELECT c.country, (SUM(CASE WHEN o.status = 'completed' THEN 1 ELSE 0 END) * 100.0 / COUNT(o.id)) AS completed_percentage FROM orders o JOIN customers c ON o.customer_id = c.id GROUP BY c.country;",
+    "question": "List the top 5 customers by total order value and their respective countries.",
+    "sql": "SELECT c.name, c.country, SUM(oi.quantity * oi.unit_price) AS total_order_value FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' GROUP BY c.name, c.country ORDER BY total_order_value DESC LIMIT 5",
     "difficulty": "medium",
-    "notes": "Aggregation with CASE statements and grouping",
+    "notes": "Combines multiple JOINs and aggregates to rank customers",
     "expected_rows": [
       [
-        "Italy",
-        0.0
-      ],
-      [
-        "Brazil",
-        50.0
-      ],
-      [
-        "Germany",
-        100.0
-      ],
-      [
+        "Alice Martin",
         "USA",
-        83.33
+        599.92
       ],
       [
-        "France",
-        0.0
-      ],
-      [
-        "Canada",
-        100.0
-      ],
-      [
-        "India",
-        100.0
-      ]
-    ],
-    "id": "sq039"
-  },
-  {
-    "question": "How many unique products have been ordered by customers from each country?",
-    "sql": "SELECT c.country, COUNT(DISTINCT oi.product_id) AS unique_products FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' GROUP BY c.country",
-    "difficulty": "medium",
-    "notes": "Counting distinct products ordered by country",
-    "expected_rows": [
-      [
-        "USA",
-        5
-      ],
-      [
+        "Bob Schmidt",
         "Germany",
-        4
+        384.92
       ],
       [
+        "David Chen",
         "Canada",
-        2
+        114.98
       ],
       [
-        "Brazil",
-        1
+        "Grace Kim",
+        "USA",
+        99.96
       ],
       [
-        "India",
-        1
+        "Frank M\u00fcller",
+        "Germany",
+        89.99
       ]
     ],
-    "id": "sq010"
+    "id": "sq004"
   },
   {
-    "question": "What are the average prices of products in each category and how many products are in each category?",
-    "sql": "SELECT p.category, AVG(p.price) AS average_price, COUNT(p.id) AS product_count FROM products p GROUP BY p.category;",
+    "question": "What are the total sales and total number of orders for each product category?",
+    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_sales, COUNT(DISTINCT o.id) AS total_orders FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id GROUP BY p.category",
     "difficulty": "medium",
-    "notes": "Aggregates data to find average price and product count",
+    "notes": "Aggregation across multiple tables",
     "expected_rows": [
+      [
+        "Furniture",
+        1704.93,
+        6
+      ],
       [
         "Electronics",
-        119.99,
-        5
+        1309.87,
+        10
       ],
       [
         "Stationery",
-        7.49,
-        2
-      ],
-      [
-        "Furniture",
-        278.32,
+        74.9,
         3
       ]
     ],
-    "id": "sq036"
+    "id": "sq002"
   },
   {
-    "question": "What is the average order value for customers who signed up in the last year?",
-    "sql": "SELECT AVG(total_order_value) FROM (SELECT o.id, SUM(oi.quantity * oi.unit_price) AS total_order_value FROM orders o JOIN order_items oi ON o.id = oi.order_id JOIN customers c ON o.customer_id = c.id WHERE c.signup_date >= CURRENT_DATE - INTERVAL '1 year' GROUP BY o.id) AS order_totals;",
-    "difficulty": "hard",
-    "notes": "Subquery with aggregation and date filtering",
+    "question": "What is the average order value for completed orders in the last quarter?",
+    "sql": "SELECT AVG(oi.quantity * oi.unit_price) AS avg_order_value FROM orders o JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' AND o.order_date >= DATE_TRUNC('quarter', CURRENT_DATE) - INTERVAL '3 months'",
+    "difficulty": "medium",
+    "notes": "Uses JOIN and filtering by date and status",
     "expected_rows": [
       [
         null
       ]
     ],
-    "id": "sq037"
+    "id": "sq005"
   },
   {
-    "question": "What is the average order value for each customer from Germany?",
-    "sql": "SELECT c.id, c.name, AVG(oi.quantity * oi.unit_price) AS average_order_value FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE c.country = 'Germany' AND o.status = 'completed' GROUP BY c.id, c.name",
+    "question": "What is the average order value per customer in each country?",
+    "sql": "SELECT c.country, AVG(oi.quantity * oi.unit_price) AS avg_order_value FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' GROUP BY c.country",
     "difficulty": "medium",
-    "notes": "Aggregation with JOINs focusing on a specific customer group",
-    "expected_rows": [
-      [
-        6,
-        "Frank M\u00fcller",
-        89.99
-      ],
-      [
-        2,
-        "Bob Schmidt",
-        128.31
-      ]
-    ],
-    "id": "sq043"
-  },
-  {
-    "question": "What is the most popular product category among customers from Canada based on completed orders?",
-    "sql": "SELECT p.category, COUNT(oi.id) AS order_count FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'Canada' AND o.status = 'completed' GROUP BY p.category ORDER BY order_count DESC LIMIT 1",
-    "difficulty": "medium",
-    "notes": "Aggregation to find the most popular category",
-    "expected_rows": [
-      [
-        "Furniture",
-        1
-      ]
-    ],
-    "id": "sq017"
-  },
-  {
-    "question": "List the countries with their respective total number of completed orders in descending order.",
-    "sql": "SELECT c.country, COUNT(o.id) AS total_completed_orders FROM customers c JOIN orders o ON c.id = o.customer_id WHERE o.status = 'completed' GROUP BY c.country ORDER BY total_completed_orders DESC",
-    "difficulty": "medium",
-    "notes": "Aggregation and grouping by country",
+    "notes": "Uses JOINs and aggregation to calculate average order value",
     "expected_rows": [
       [
         "USA",
-        5
+        87.48
       ],
       [
         "Germany",
-        3
-      ],
-      [
-        "Brazil",
-        1
+        118.73
       ],
       [
         "Canada",
-        1
+        57.49
       ],
       [
         "India",
-        1
-      ]
-    ],
-    "id": "sq029"
-  },
-  {
-    "question": "What is the total revenue per category for customers in the USA?",
-    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category",
-    "difficulty": "medium",
-    "notes": "JOIN across 4 tables with aggregation",
-    "expected_rows": [
-      [
-        "Electronics",
-        649.93
+        79.99
       ],
       [
-        "Stationery",
-        49.95
+        "Brazil",
+        69.98
       ]
     ],
-    "id": "sq047"
-  },
-  {
-    "question": "Which products have been ordered but have never been completed?",
-    "sql": "SELECT DISTINCT p.id, p.name FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status != 'completed'",
-    "difficulty": "medium",
-    "notes": "Identifying products with specific order status",
-    "expected_rows": [
-      [
-        5,
-        "Ergonomic Chair"
-      ],
-      [
-        6,
-        "Standing Desk"
-      ],
-      [
-        10,
-        "Monitor 27\""
-      ]
-    ],
-    "id": "sq046"
+    "id": "sq011"
   }
 ]

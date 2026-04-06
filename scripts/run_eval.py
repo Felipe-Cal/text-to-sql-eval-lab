@@ -47,6 +47,15 @@ console = Console()
 STRATEGY_CHOICES = [s.value for s in PromptStrategy]
 
 
+def normalize_model_name(model: str) -> str:
+    """
+    Normalize common provider aliases to the API prefix expected by Inspect AI.
+    """
+    if model.startswith("gemini/"):
+        return model.replace("gemini/", "google/", 1)
+    return model
+
+
 def run(
     models: list[str],
     strategies: list[str],
@@ -59,17 +68,24 @@ def run(
     comparing_strategies = len(strategies) > 1
 
     for model in models:
+        inspect_model = normalize_model_name(model)
+        if inspect_model != model:
+            console.print(
+                f"[dim]Normalizing Inspect model alias: {model} -> {inspect_model}[/dim]"
+            )
+
         for strategy_str in strategies:
             strategy = PromptStrategy(strategy_str)
 
             # Row label: include strategy only when comparing more than one
-            label = f"{model} [{strategy_str}]" if comparing_strategies else model
+            label_model = model if inspect_model == model else f"{model} (inspect: {inspect_model})"
+            label = f"{label_model} [{strategy_str}]" if comparing_strategies else label_model
 
             console.rule(f"[bold blue]Evaluating: {label}")
 
             logs = inspect_eval(
                 text_to_sql(model=model, difficulty=difficulty, strategy=strategy),
-                model=model,
+                model=inspect_model,
                 log_dir="./logs",
             )
 

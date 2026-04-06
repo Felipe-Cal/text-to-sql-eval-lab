@@ -1,9 +1,15 @@
 import os
 import json
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
 import dspy
+
+# Ensure project root is on sys.path when run as:
+#   python scripts/optimize_prompt.py
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from src.utils.db import execute_query
 from src.evals.scorers import _normalize_rows
 from src.agent.schema_retriever import retrieve_schema

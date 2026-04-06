@@ -397,6 +397,24 @@ def avg_total_tokens() -> Scorer:
 
 
 @scorer(metrics=[mean()])
+def avg_tool_calls() -> Scorer:
+    """
+    Returns the number of tool calls made by the tool_use agent per question.
+    For non-tool-use strategies this is always 0, which makes it a useful
+    comparison metric — it quantifies the extra LLM round-trips the agentic
+    approach costs relative to a single-shot strategy.
+    """
+    async def score(state: TaskState, target: Target) -> Score:
+        tool_calls = state.metadata.get("tool_calls", [])
+        n = len(tool_calls)
+        tools_used = list({tc.get("tool") for tc in tool_calls}) if tool_calls else []
+        explanation = f"{n} tool calls: {tools_used}" if tools_used else "0 tool calls (non-agentic strategy)"
+        return Score(value=n, explanation=explanation)
+
+    return score
+
+
+@scorer(metrics=[mean()])
 def retrieval_recall() -> Scorer:
     """Returns the % of required tables that were successfully retrieved by the RAG module."""
     async def score(state: TaskState, target: Target) -> Score:

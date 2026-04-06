@@ -28,10 +28,9 @@ Natural language question + schema
 3. Four **scorers** evaluate the query independently, in increasing order of sophistication:
    - `syntax_valid` — parses the SQL with [sqlglot](https://github.com/tobymao/sqlglot); no database needed.
    - `execution_ok` — runs the query against the real DuckDB database; checks it doesn't error.
-   - `result_match` — executes the query and compares the returned rows to the golden expected rows (1.0 = exact match, 0.5 = right shape but wrong values, 0.0 = wrong).
-   - `semantic_judge` — sends the question, generated SQL, actual results, and expected results to a judge LLM; parses a structured verdict (`correct` / `partial` / `incorrect`). Catches false negatives from `result_match` caused by different column aliases, equivalent SQL written differently, or minor float precision gaps.
-4. **Self-Correction loop**: If a generated query throws a syntax or execution error in DuckDB, the agent automatically feeds the error back into its conversation history and retries up to 3 times.
-5. **Constraint tracking**: Custom Inspect metrics natively track the `cost`, `latency`, `tokens`, and average `attempts` required for the run, tracking production viability alongside raw accuracy.
+   - `result_match` — executes and compares returned rows to golden expected rows (1.0 = exact, 0.5 = right shape, 0.0 = wrong).
+   - `semantic_judge` — sends question, generated SQL, actual results, and expected results to a judge LLM for a structured verdict.
+4. **Self-correction loop**: on SQL error, the agent feeds the error back into its conversation and retries up to 3 times.
 
 The eval harness is [Inspect AI](https://inspect.aisi.org.uk/), which handles parallelism, logging, and the `inspect view` log explorer.
 
@@ -39,8 +38,8 @@ The eval harness is [Inspect AI](https://inspect.aisi.org.uk/), which handles pa
 
 ## Dataset
 
-1. **Golden Suite:** 15 hand-crafted question/answer pairs in `datasets/golden/questions.json` against a toy e-commerce DuckDB database.
-2. **Synthetic Data Flywheel:** The script `scripts/generate_synthetic.py` uses an LLM to look at the schema, invent difficult questions, and *verify* them by executing them against the DuckDB instance. Validated outputs are split into `tuning.json` (80%) and `holdout_test.json` (20%) to test for generalization and prevent prompt overfitting.
+- **Golden suite:** 15 hand-crafted Q&A pairs in `datasets/golden/questions.json`.
+- **Synthetic flywheel:** `scripts/generate_synthetic.py` generates and validates synthetic questions, split into `tuning.json` (80%) and `holdout_test.json` (20%).
 
 **Schema**
 
@@ -51,7 +50,7 @@ orders(id, customer_id, order_date, status)       -- status: completed | pending
 order_items(id, order_id, product_id, quantity, unit_price)
 ```
 
-The schema is intentionally wrapped inside a **50-table enterprise data warehouse** simulation (46 decoy tables from unrelated domains like HR, logistics, finance, marketing). This is used by the RAG strategy to stress-test schema linking under realistic noise conditions.
+The schema is wrapped inside a **50-table enterprise data warehouse** simulation (46 decoy tables from HR, logistics, finance, marketing) to stress-test schema linking via the `rag` strategy.
 
 **Difficulty breakdown**
 
@@ -69,644 +68,59 @@ The schema is intentionally wrapped inside a **50-table enterprise data warehous
 
 ```bash
 pip install -e ".[dev]"
+cp .env.example .env   # fill in API keys
 ```
 
-Copy `.env.example` to `.env` and fill in your API keys:
+Key `.env` variables:
 
-```bash
-cp .env.example .env
-```
+| Variable | Purpose |
+|---|---|
+| `OPENAI_API_KEY` | OpenAI API key |
+| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `DEFAULT_MODEL` | LiteLLM model string (e.g. `openai/gpt-4o-mini`) |
+| `DATABASE_PATH` | Path to DuckDB file |
+| `JUDGE_MODEL` | Model used by the semantic_judge scorer |
+| `EMBEDDING_MODEL` | Model used for few_shot_dynamic and RAG strategies |
+| `HARD_MODEL` | Escalation model for hard questions in the router (optional) |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Langfuse observability (optional) |
 
-```ini
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-DEFAULT_MODEL=openai/gpt-4o-mini
-DATABASE_PATH=./datasets/ecommerce.duckdb
-
-# LLM-as-judge scorer — can be a different (stronger) model than the one being evaluated
-JUDGE_MODEL=openai/gpt-4o-mini
-
-# Embedding model for few_shot_dynamic and RAG strategies
-EMBEDDING_MODEL=openai/text-embedding-3-small
-```
-
-The database is seeded automatically on first run. To reseed manually:
-
-```bash
-python src/utils/db.py
-```
+The database is seeded automatically on first run. To reseed manually: `python src/utils/db.py`.
 
 ---
 
-## Prompt strategies
-
-Five strategies are available, controlling what context is prepended to the prompt before the schema and question:
-
-| Strategy | Description | Extra cost |
-|---|---|---|
-| `zero_shot` | Schema + question only (default) | none |
-| `few_shot_static` | Prepends 3 fixed examples (easy/medium/hard) | none |
-| `few_shot_dynamic` | Embeds the question, picks 3 most similar golden examples by cosine similarity | 1 embedding call |
-| `chain_of_thought` | Instructs the model to reason step-by-step before writing SQL | none (larger output) |
-| `rag` | Embeds the question and retrieves the top-K most semantically relevant table definitions from the 50-table DWH, rather than sending the full schema | 1 embedding call |
-
-### RAG schema linking (`rag` strategy)
-
-Rather than passing all 50 table definitions to the model (which balloons the prompt and confuses smaller models), the `rag` strategy:
-
-1. Embeds the natural language question using the configured embedding model.
-2. Pre-computes and **caches** embeddings for all 50 table definitions (only once per process).
-3. Ranks tables by **cosine similarity** and injects only the top-K (default: 5) into the prompt.
-4. Tracks `retrieval_recall` as an eval metric — what % of the tables required by the golden SQL were actually retrieved.
-
-This simulates a real enterprise use case where the schema is too large to fit in the prompt.
-
----
-
-## Running evaluations
-
-All commands below use **15** golden questions unless you pass `--difficulty` (easy = 5, medium = 5, hard = 5). Logs are written to **`./logs/`**.
-
-### Quick start (single run)
+## Quick start
 
 ```bash
-# Default: openai/gpt-4o-mini, zero_shot, all difficulties
+# Run evals (default: gpt-4o-mini, zero_shot, all 15 questions)
 python scripts/run_eval.py
-```
 
-### One model, all strategies (full strategy sweep)
+# Recommended strategy
+python scripts/run_eval.py --strategy few_shot_dynamic
 
-Runs four strategies back-to-back and prints one summary table.
+# Gemini alias is accepted and normalized to the Inspect API prefix
+python scripts/run_eval.py --model gemini/gemini-2.0-flash --strategy few_shot_dynamic
 
-```bash
-python scripts/run_eval.py --strategies zero_shot few_shot_static few_shot_dynamic chain_of_thought
-```
-
-### Full benchmark: models × strategies (matrix)
-
-Runs every combination (e.g. 2 models × 4 strategies = **8** eval runs). Expect on the order of **~30–45 minutes** depending on API latency and models.
-
-```bash
-python scripts/run_eval.py \
-  --models openai/gpt-4o-mini anthropic/claude-haiku-4-5 \
-  --strategies zero_shot few_shot_static few_shot_dynamic chain_of_thought
-```
-
-### Other useful options
-
-```bash
-# Single model and strategy
-python scripts/run_eval.py --model anthropic/claude-haiku-4-5 --strategy few_shot_dynamic
-
-# Only hard questions (q11–q15)
-python scripts/run_eval.py --model openai/gpt-4o-mini --difficulty hard
-
-# Compare models only (default strategy: zero_shot)
-python scripts/run_eval.py --models openai/gpt-4o-mini anthropic/claude-haiku-4-5
-```
-
-### Inspect AI CLI (advanced)
-
-Equivalent to what `run_eval.py` wraps, with full Inspect flags:
-
-```bash
-inspect eval src/evals/tasks.py --model openai/gpt-4o-mini
-```
-
-Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works — pass the `provider/model-name` string. The judge model is controlled separately via `JUDGE_MODEL` and can be set to a stronger model (e.g. `openai/gpt-4o`) for stricter evaluation without changing the model under test.
-
----
-
-## FastAPI service
-
-The agent and eval suite are exposed as an HTTP service so they can be integrated with frontends, CI pipelines, Slack bots, or any other system.
-
-### Start the server
-
-```bash
+# Start the API server
 uvicorn src.api.main:app --reload
-```
 
-The server starts at `http://localhost:8000`. Visit `http://localhost:8000/docs` for the auto-generated interactive Swagger UI where you can try every endpoint from the browser.
-
-### Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Health check |
-| `POST` | `/query` | Run the text-to-SQL agent on a question |
-| `POST` | `/evals/run` | Start an eval run in the background; returns a `job_id` |
-| `GET` | `/evals/{job_id}` | Poll an eval job's status and results |
-
----
-
-### `POST /query` — run the agent
-
-Runs the text-to-SQL agent on a natural language question and returns the generated SQL plus full execution metadata.
-
-**Request body:**
-
-```json
-{
-  "question": "What are the top 3 customers by total spend?",
-  "model": "openai/gpt-4o-mini",
-  "strategy": "few_shot_dynamic"
-}
-```
-
-- `model` — optional; defaults to `DEFAULT_MODEL` env var
-- `strategy` — optional; one of `zero_shot`, `few_shot_static`, `few_shot_dynamic`, `chain_of_thought`, `rag`; defaults to `zero_shot`
-
-**Response:**
-
-```json
-{
-  "question": "What are the top 3 customers by total spend?",
-  "sql": "SELECT c.name, SUM(oi.quantity * oi.unit_price) AS total_spend ...",
-  "model": "openai/gpt-4o-mini",
-  "strategy": "few_shot_dynamic",
-  "reasoning": null,
-  "prompt_tokens": 412,
-  "completion_tokens": 58,
-  "cost": 0.00008,
-  "latency": 1.23,
-  "attempts": 1,
-  "trace_id": "abc123"
-}
-```
-
-- `reasoning` is non-null only for `chain_of_thought` strategy (contains the model's step-by-step reasoning).
-- `attempts` shows how many tries the self-correction loop needed (1 = first try succeeded).
-- `trace_id` links to the Langfuse trace for this call (if Langfuse is configured).
-
----
-
-### `POST /evals/run` — start an eval job
-
-Eval runs are long (minutes), so this endpoint returns immediately with a `job_id` and runs the evaluation in the background. Poll `GET /evals/{job_id}` to check progress.
-
-**Request body:**
-
-```json
-{
-  "model": "openai/gpt-4o-mini",
-  "strategy": "zero_shot",
-  "difficulty": "hard",
-  "judge_model": "openai/gpt-4o"
-}
-```
-
-- All fields are optional. `difficulty` filters to `easy`, `medium`, or `hard`; omit for all 15 questions.
-- `judge_model` overrides the `JUDGE_MODEL` env var for this run only.
-
-**Response (202 Accepted):**
-
-```json
-{
-  "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "status": "running",
-  "started_at": "2026-04-03T10:00:00Z",
-  "finished_at": null,
-  "results": null,
-  "error": null
-}
-```
-
----
-
-### `GET /evals/{job_id}` — poll eval results
-
-**Response when running:**
-
-```json
-{
-  "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "status": "running",
-  "started_at": "2026-04-03T10:00:00Z",
-  "finished_at": null,
-  "results": null,
-  "error": null
-}
-```
-
-**Response when completed:**
-
-```json
-{
-  "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "status": "completed",
-  "started_at": "2026-04-03T10:00:00Z",
-  "finished_at": "2026-04-03T10:02:35Z",
-  "results": {
-    "total_samples": 15,
-    "scores": {
-      "syntax_valid":  { "accuracy": 1.0 },
-      "execution_ok":  { "accuracy": 0.933 },
-      "result_match":  { "accuracy": 0.933 },
-      "semantic_judge":{ "accuracy": 0.933 },
-      "avg_attempts":  { "mean": 1.07 },
-      "avg_cost":      { "mean": 0.000082 },
-      "avg_latency":   { "mean": 1.41 },
-      "avg_total_tokens": { "mean": 487 },
-      "retrieval_recall": { "mean": 1.0 }
-    }
-  },
-  "error": null
-}
-```
-
-### Design notes
-
-- **`/query` is non-blocking** — the LiteLLM call runs in a thread pool via `asyncio.to_thread`, so FastAPI's event loop is never blocked while waiting for the LLM.
-- **`/evals/run` is fire-and-forget** — eval jobs run in the background; you poll for results. This is necessary because a full 15-question run with judge scoring takes 1–3 minutes.
-- **In-memory job store** — jobs are stored in a Python dict keyed by UUID. Fine for local use; swap for Redis/database in production.
-
----
-
-## Fine-tuning
-
-Rather than prompting a large general-purpose model, fine-tuning trains a small open-source model (Llama 3.1 8B) to specialise in text-to-SQL. The result is a model that requires no few-shot examples or chain-of-thought prompting — it has learned the task directly from data.
-
-### How it works
-
-```
-tuning.json (40 synthetic) + golden/questions.json (15 hand-crafted)
-                │
-                ▼
-  prepare_finetune_data.py
-  Converts Q&A pairs → JSONL chat format (system + user + assistant)
-                │
-                ▼
-  Google Colab T4 GPU
-  Llama 3.1 8B + LoRA adapters (r=16, ~1% of parameters trained)
-  3 epochs, ~15 minutes, SFTTrainer
-                │
-                ▼
-  Export to GGUF (Q4_K_M, ~4.5GB)
-                │
-                ▼
-  ollama create text2sql-llama -f Modelfile
-                │
-                ▼
-  python scripts/run_eval.py --model ollama/text2sql-llama --strategy zero_shot
-```
-
-### Why LoRA instead of full fine-tuning
-
-Full fine-tuning retrains all 8 billion parameters — requires ~80GB VRAM and thousands of dollars. LoRA freezes the original weights and trains small adapter matrices injected into each attention layer, reducing trainable parameters by ~99%. With 4-bit quantization (QLoRA), the whole thing fits on a free Colab T4 GPU.
-
-### Step 1 — Prepare the data (run locally)
-
-```bash
-python scripts/prepare_finetune_data.py
-```
-
-Outputs:
-- `datasets/finetune/train.jsonl` — 90% of combined dataset (40 examples)
-- `datasets/finetune/eval.jsonl` — 10% held out for training-time eval (5 examples)
-
-Each example is formatted as a three-turn conversation:
-```json
-{
-  "messages": [
-    {"role": "system",    "content": "You are an expert SQL engineer..."},
-    {"role": "user",      "content": "Schema:\n...\n\nQuestion: What is the total revenue?"},
-    {"role": "assistant", "content": "SELECT ROUND(SUM(oi.quantity * oi.unit_price), 2) ..."}
-  ]
-}
-```
-
-### Step 2 — Train on Colab
-
-1. Open `notebooks/finetune_llama.ipynb` in Google Colab
-2. Set runtime to **T4 GPU** (`Runtime → Change runtime type → T4 GPU`)
-3. Run all cells — training takes ~15 minutes
-4. Download the exported GGUF file
-
-### Step 3 — Serve locally with Ollama
-
-```bash
-# Import the fine-tuned model
-echo 'FROM ./text2sql-llama.Q4_K_M.gguf' > Modelfile
-ollama create text2sql-llama -f Modelfile
-
-# Run it
-ollama run text2sql-llama
-```
-
-### Step 4 — Evaluate and compare
-
-```bash
-# LiteLLM supports Ollama natively via the ollama/ prefix
-python scripts/run_eval.py --model ollama/text2sql-llama --strategy zero_shot
-python scripts/run_eval.py --model ollama/text2sql-llama --strategy few_shot_dynamic
-```
-
-**Measured results (Apple M1, 15 golden questions):**
-
-| Model | Strategy | result_match | semantic_judge | cost/query | avg latency |
-|---|---|---|---|---|---|
-| gpt-4o-mini | zero_shot | 0.667 | 0.733 | ~$0.002 | ~2s |
-| gpt-4o-mini | few_shot_dynamic | 0.933 | 0.933 | ~$0.002 | ~2s |
-| **Llama 3.1 8B fine-tuned** | **zero_shot** | **0.667** | **0.567** | **$0.000** | **99s** |
-| **Llama 3.1 8B fine-tuned** | **few_shot_dynamic** | **0.800** | **0.867** | **$0.000** | **74s** |
-
-**Key finding:** The fine-tuned Llama with `few_shot_dynamic` **outperforms GPT-4o-mini zero_shot on both metrics** at zero inference cost. With few-shot examples it also beats GPT-4o-mini on `result_match` (+20%) and `semantic_judge` (+18%). The only trade-off is latency — local CPU/MPS inference runs ~74s per question vs ~2s for a cloud API. On a GPU (e.g. A10G), this drops to ~5–8s.
-
-The `few_shot_dynamic` boost is particularly strong on the fine-tuned model: without examples it struggles on hard questions (semantic_judge 0.567), but the domain-specific few-shot context closes the gap dramatically (0.867) — combining fine-tuning with in-context examples proves more effective than either alone.
-
----
-
-## Model routing
-
-Rather than using the same model and strategy for every question, the router classifies each question's difficulty and dispatches it to the most appropriate model + strategy — saving cost on easy questions while ensuring hard ones get the best treatment.
-
-### How it works
-
-```
-Question comes in
-      │
-      ▼
-Stage 1: Rule-based classifier (free, instant)
-  Score question against keyword patterns
-  (e.g. "never", "NOT IN", "month-by-month" → hard)
-      │
-      ├── Confidence ≥ 0.30 → use rule-based result
-      └── Confidence < 0.30 → Stage 2: Embedding k-NN
-                                  Embed question, find K nearest
-                                  golden examples, majority vote
-      │
-      ▼
-Routing table
-  easy   → DEFAULT_MODEL + zero_shot
-  medium → DEFAULT_MODEL + few_shot_dynamic
-  hard   → HARD_MODEL    + few_shot_dynamic
-```
-
-### Routing table
-
-| Difficulty | Model | Strategy | Rationale |
-|---|---|---|---|
-| easy | `DEFAULT_MODEL` | `zero_shot` | Simple queries need no examples |
-| medium | `DEFAULT_MODEL` | `few_shot_dynamic` | JOINs + aggregations benefit from examples |
-| hard | `HARD_MODEL` | `few_shot_dynamic` | Escalate to stronger model if configured |
-
-Set `HARD_MODEL` in `.env` to escalate hard questions to a stronger model (e.g. `openai/gpt-4o`). Without it, the router still routes to different strategies on the same model.
-
-### Using the routed strategy
-
-```bash
-# Via CLI eval
-python scripts/run_eval.py --strategy routed
-
-# Via API
-curl -X POST http://localhost:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Which customers have never placed a completed order?", "strategy": "routed"}'
-```
-
-The response includes `routed_difficulty` and `router_method` so you can see how the decision was made:
-
-```json
-{
-  "sql": "SELECT name FROM customers WHERE ...",
-  "strategy": "few_shot_dynamic",
-  "routed_difficulty": "hard",
-  "router_method": "rule_based"
-}
-```
-
-### Benchmark routing
-
-Compare routing against fixed baselines to measure the quality/cost tradeoff:
-
-```bash
-python scripts/benchmark_routing.py
-```
-
-This runs three configurations side-by-side:
-
-| Configuration | What it uses |
-|---|---|
-| `baseline_cheap` | always `gpt-4o-mini` + `zero_shot` |
-| `baseline_best` | always `gpt-4o-mini` + `few_shot_dynamic` |
-| `routed` | router picks strategy (and model) per question |
-
-The goal: `routed` quality ≈ `baseline_best`, `routed` cost < `baseline_best`.
-
----
-
-## DSPy prompt optimization
-
-Rather than hand-crafting prompts, [DSPy](https://dspy.ai) treats prompts as learnable programs. The optimizer automatically finds the best few-shot demonstrations from your training data by trying candidates and keeping the ones that actually improve the metric — no manual prompt tuning required.
-
-### How it works
-
-```
-Synthetic tuning dataset (tuning.json)
-            │
-            ▼
-     DSPy BootstrapFewShot
-      ├── Tries candidate demonstrations
-      ├── Executes predicted SQL against DuckDB
-      └── Keeps demos that maximize result_match
-            │
-            ▼
-  Compiled prompt saved to datasets/dspy_optimized_prompt.json
-```
-
-1. A `TextToSQL` **Signature** declares the task as typed I/O fields: `schema + question → sql`.
-2. `SQLGenerator` wraps it in `dspy.ChainOfThought`, which automatically adds a reasoning step before the SQL output — no manual CoT prompt needed.
-3. The **`db_metric`** function is the optimization target: it executes the predicted SQL against DuckDB and returns `1` if the rows exactly match the expected result (using the same `_normalize_rows` helper as the eval scorers), `0` otherwise.
-4. **`BootstrapFewShot`** tries many few-shot demo combinations from the synthetic tuning set, evaluates each one with `db_metric`, and keeps the top 4 bootstrapped + 4 labeled demos that maximize real execution accuracy.
-5. The compiled module (with its optimized demonstrations baked in) is saved as JSON and can be loaded for inference without re-running the optimizer.
-
-### Inputs
-
-DSPy optimization consumes the **synthetic tuning dataset** generated by `scripts/generate_synthetic.py` (`datasets/synthetic/tuning.json`). It also calls the RAG schema retriever to pre-fetch relevant table definitions for each training question — the same schema context the model will see at inference time.
-
-### Run the optimizer
-
-```bash
-python scripts/optimize_prompt.py
-```
-
-This will:
-1. Load `datasets/synthetic/tuning.json`
-2. Fetch RAG schemas for each training question (cached after first call)
-3. Run `BootstrapFewShot` optimization
-4. Save the compiled prompt to `datasets/dspy_optimized_prompt.json`
-
-Expect the run to take a few minutes — the optimizer makes one LLM + one DuckDB execution call per candidate demo tried.
-
-### DSPy vs manual prompt strategies
-
-| Approach | How examples are chosen | Optimized for |
-|---|---|---|
-| `few_shot_static` | Hand-picked by the developer | Developer intuition |
-| `few_shot_dynamic` | Nearest neighbor by embedding similarity to the question | Semantic similarity |
-| DSPy `BootstrapFewShot` | Automatically selected by trying candidates and measuring real execution accuracy | Actual task metric (result_match) |
-
-The key difference: DSPy demos are chosen because they were **empirically proven to improve SQL execution accuracy**, not because a human thought they looked like good examples or because they were semantically similar.
-
-### Key DSPy concepts used
-
-| Concept | What it does |
-|---|---|
-| `dspy.Signature` | Declares the task as typed I/O: `schema + question → sql` |
-| `dspy.ChainOfThought` | Adds an automatic reasoning step before the output field |
-| `dspy.Module` | Wraps the pipeline into a composable, optimizable program |
-| `BootstrapFewShot` | Optimizer that bootstraps few-shot demos from a training set using a metric |
-| `db_metric` | Custom metric: executes SQL against DuckDB, compares rows to expected |
-| `.save()` / `.load()` | Serializes the compiled (optimized) prompt for reuse |
-
----
-
-## Evals-as-CI (GitHub Actions)
-
-Every push and pull request to `main` runs the eval suite automatically via GitHub Actions. The pipeline blocks merges if scores drop below defined thresholds — preventing prompt regressions the same way unit tests prevent code regressions.
-
-### How it works
-
-```
-PR opened / push to main
-        │
-        ▼
-GitHub Actions: eval.yml
-        │
-        ├── Install dependencies
-        ├── Seed DuckDB
-        └── python scripts/ci_eval.py
-                │
-                ├── Runs full eval (15 questions, zero_shot)
-                ├── Compares each scorer against threshold
-                │
-                ├── All pass → ✅ CI green, PR can merge
-                └── Any fail → ❌ CI red, merge blocked
-```
-
-### Thresholds
-
-Set conservatively below the known zero_shot baseline to catch real regressions without being brittle to natural LLM variance:
-
-| Scorer | Threshold | Baseline |
-|---|---|---|
-| `syntax_valid` | 0.90 | 1.00 |
-| `execution_ok` | 0.80 | 0.933 |
-| `result_match` | 0.60 | 0.733 |
-| `semantic_judge` | 0.73 | 0.867 |
-
-### Setup
-
-Add your API keys as GitHub Actions secrets in your repo settings:
-
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY` (optional, only needed if testing Anthropic models)
-
-The workflow file is at `.github/workflows/eval.yml`. Eval logs are uploaded as artifacts and retained for 14 days — download them from the Actions tab and explore with `python -m inspect_ai view start --log-dir ./logs`.
-
-### Running the gate locally
-
-```bash
-# Default thresholds, zero_shot
-python scripts/ci_eval.py
-
-# Custom strategy and thresholds
-python scripts/ci_eval.py --strategy few_shot_dynamic --result-match 0.90
-
-# Exits 0 on pass, 1 on failure — safe to use in any shell script or CI system
-```
-
----
-
-## Guardrails and tests (pytest)
-
-Implementation lives under [`src/guardrails/`](src/guardrails/): deterministic checks with **no extra LLM calls**. Call `check_input` before the LLM and `check_output` on generated SQL before execution when you wire a production path; this repo ships the **library plus tests** so behavior stays regression-tested.
-
-```bash
+# Run tests
 pytest
 ```
 
-### Input guardrails ([`src/guardrails/input.py`](src/guardrails/input.py))
-
-Run **before** the model sees the question (`check_input`). Two independent checks; the first failure wins:
-
-| Check | What it blocks |
-|--------|----------------|
-| **SQL injection** | Raw SQL fragments in the user string: DDL/DML keywords, comment tricks (`--`, `/* */`), `UNION` injection, stacked `;` queries, etc. |
-| **Prompt injection** | Phrases that try to override instructions ("ignore the above", "new instructions", jailbreak-style patterns). |
-
-Tests in [`tests/test_input_guardrails.py`](tests/test_input_guardrails.py) cover legitimate golden-style questions (must pass), injection strings (must fail), and edge cases (empty input, mixed case).
-
-### Output guardrails ([`src/guardrails/output.py`](src/guardrails/output.py))
-
-Run **after** the model returns SQL, **before** execution (`check_output`):
-
-| Check | What it does |
-|--------|----------------|
-| **SELECT-only** | Uses **sqlglot AST**: root statement must be read-only; blocks DDL (e.g. `DROP`, `CREATE`) and DML (`INSERT`, `UPDATE`, `DELETE`). |
-| **Schema scope** | Every referenced table must be in the allowlist (`customers`, `products`, `orders`, `order_items` by default). Stops queries against arbitrary tables (e.g. catalog tables). |
-
-Tests in [`tests/test_output_guardrails.py`](tests/test_output_guardrails.py) cover valid `SELECT`s (including joins, CTEs, trailing `;`), and ensure DDL/DML / unknown tables are rejected.
-
-### Adversarial tests ([`tests/test_guardrails_adversarial.py`](tests/test_guardrails_adversarial.py))
-
-Goes beyond happy paths: **evasion attempts** (obfuscated keywords, leetspeak, Unicode lookalikes, prompt-injection phrasing). Some cases are marked **`xfail`** — they document **known gaps** of regex/keyword input filtering (not silent failures). The file's docstring explains the finding: **output** guardrails (AST-based) are harder to evade than **input** (regex-based); **defense in depth** means input bypasses may still be caught at output.
-
-```bash
-pytest tests/test_input_guardrails.py -v
-pytest tests/test_output_guardrails.py -v
-pytest tests/test_guardrails_adversarial.py -v
-```
-
 ---
 
-## Experimental findings
+## Going deeper
 
-### GPT-4o-mini strategy sweep (15 questions)
-
-| Strategy | result_match | semantic_judge | time |
-|---|---|---|---|
-| `zero_shot` | 0.667 | 0.733 | 0:48 |
-| `few_shot_static` | 0.767 | 0.767 | 0:48 |
-| `few_shot_dynamic` | **0.933** | **0.933** | 0:52 |
-| `chain_of_thought` | 0.667 | 0.800 | 1:16 |
-
-### Fine-tuned Llama 3.1 8B vs GPT-4o-mini (15 questions)
-
-| Model | Strategy | result_match | semantic_judge | avg_cost | avg_latency |
-|---|---|---|---|---|---|
-| gpt-4o-mini | zero_shot | 0.667 | 0.733 | ~$0.002 | ~2s |
-| gpt-4o-mini | few_shot_dynamic | 0.933 | 0.933 | ~$0.002 | ~2s |
-| Llama 3.1 8B (fine-tuned) | zero_shot | 0.667 | 0.567 | **$0.000** | 99s |
-| Llama 3.1 8B (fine-tuned) | few_shot_dynamic | **0.800** | **0.867** | **$0.000** | 74s |
-
-**Key findings:**
-
-- **`few_shot_dynamic` is the recommended strategy for cloud models** — +40% result_match over zero_shot for gpt-4o-mini, only +4s latency, and the only strategy where result_match and semantic_judge are fully aligned.
-
-- **Fine-tuned Llama + `few_shot_dynamic` beats GPT-4o-mini zero_shot at zero cost** — result_match 0.800 vs 0.667 (+20%), semantic_judge 0.867 vs 0.733 (+18%). Domain-specific fine-tuning + in-context examples compounds: the model has learned SQL patterns from training data and the examples close the remaining gap on hard questions.
-
-- **Fine-tuning alone (zero_shot) matches but doesn't exceed GPT-4o-mini** — result_match 0.667 = 0.667, but semantic_judge is weaker (0.567 vs 0.733). The model produces structurally correct SQL but makes semantic errors on harder multi-table questions without examples to guide it.
-
-- **`few_shot_static` is inconsistent** — it helped `claude-haiku` significantly but *hurt* `gpt-4o-mini`'s semantic score vs zero_shot. Static examples can bias smaller models toward a specific SQL style, trading semantic correctness for syntactic similarity.
-
-- **Chain-of-thought underperformed and is not recommended for this model/task** — −10% result_match vs zero_shot, +58% latency. Root cause: CoT causes *column selection drift* — 4 of 5 failures used `SELECT *` or returned extra columns. CoT benefits larger models more; `gpt-4o-mini` lacks the reasoning capacity to reliably apply it.
-
-- **LLM judge calibration matters** — the initial `semantic_judge` produced false partial verdicts on `q02`, `q10`, and `q13` due to Python datetime reprs being passed as-is to the judge. Fixed by pre-normalizing result rows (ISO dates, rounded floats) and adding explicit grounding rules to the judge prompt.
-
-> **Tip:** cases where `result_match = 0` but `semantic_judge = 1` are false negatives in the deterministic scorer — the model was semantically correct but returned rows in a different format. Cases where `result_match > semantic_judge` indicate potential judge calibration issues worth investigating.
-
-Logs are saved to `./logs/`. Explore them in the browser:
-
-```bash
-# Recommended (uses your active Python; works well with Conda)
-python -m inspect_ai view start --log-dir ./logs
-```
-
-If `inspect view` alone shows empty rows or SSL errors, your shell may be picking a different `inspect` binary — use the command above or pass `--log-dir ./logs` explicitly.
-
-Open the URL printed in the terminal (default [http://127.0.0.1:7575](http://127.0.0.1:7575)).
+| Topic | Doc |
+|---|---|
+| Prompt strategies (zero_shot, few_shot_dynamic, rag, etc.) | [docs/strategies.md](docs/strategies.md) |
+| FastAPI endpoints (`/query`, `/evals/run`) | [docs/api.md](docs/api.md) |
+| Fine-tuning Llama 3.1 8B with LoRA | [docs/fine-tuning.md](docs/fine-tuning.md) |
+| Model router (difficulty classification) | [docs/routing.md](docs/routing.md) |
+| DSPy prompt optimization | [docs/dspy.md](docs/dspy.md) |
+| Evals-as-CI (GitHub Actions gate) | [docs/evals-ci.md](docs/evals-ci.md) |
+| Guardrails (input/output, adversarial tests) | [docs/guardrails.md](docs/guardrails.md) |
+| Experimental findings and benchmark results | [docs/findings.md](docs/findings.md) |
 
 ---
 
@@ -714,43 +128,28 @@ Open the URL printed in the terminal (default [http://127.0.0.1:7575](http://127
 
 ```
 text-to-sql-eval-lab/
-├── .github/
-│   └── workflows/
-│       └── eval.yml                 # CI eval gate — runs on every PR and push to main
+├── .github/workflows/eval.yml       # CI eval gate
 ├── datasets/
 │   ├── ecommerce.duckdb             # DuckDB database (auto-created)
-│   └── golden/
-│       └── questions.json           # 15 golden Q&A pairs
+│   ├── golden/questions.json        # 15 golden Q&A pairs
+│   ├── synthetic/                   # tuning.json + holdout_test.json
+│   └── dspy_optimized_prompt.json   # output of optimize_prompt.py
+├── docs/                            # detailed documentation
+├── notebooks/finetune_llama.ipynb   # Colab LoRA fine-tuning notebook
 ├── scripts/
-│   ├── run_eval.py                  # CLI entrypoint — supports --model(s), --strategy/strategies, --difficulty
-│   ├── generate_synthetic.py        # Data flywheel generating validated tuning + holdout datasets
-│   ├── optimize_prompt.py           # DSPy BootstrapFewShot optimizer — compiles few-shot demos from tuning.json
-│   ├── ci_eval.py                   # CI gate — runs evals and exits non-zero if scores breach thresholds
-│   ├── benchmark_routing.py         # Compares routed vs. fixed-strategy baselines on quality + cost
-│   └── prepare_finetune_data.py     # Converts Q&A pairs to JSONL chat format for LoRA fine-tuning
-notebooks/
-└── finetune_llama.ipynb             # Colab notebook: LoRA fine-tune Llama 3.1 8B, export to GGUF
-├── tests/                           # pytest — input/output/adversarial guardrails
+│   ├── run_eval.py                  # CLI eval runner
+│   ├── generate_synthetic.py        # synthetic data flywheel
+│   ├── optimize_prompt.py           # DSPy BootstrapFewShot optimizer
+│   ├── ci_eval.py                   # CI gate script
+│   ├── benchmark_routing.py         # routing vs. fixed-strategy comparison
+│   └── prepare_finetune_data.py     # data prep for LoRA fine-tuning
 ├── src/
-│   ├── api/
-│   │   ├── main.py                  # FastAPI app, router wiring, /health
-│   │   └── routes/
-│   │       ├── agent.py             # POST /query — run agent, return SQL + metadata
-│   │       └── evals.py             # POST /evals/run, GET /evals/{job_id}
-│   ├── guardrails/
-│   │   ├── input.py                 # pre-LLM: SQL + prompt injection checks
-│   │   └── output.py                # post-LLM: SELECT-only + schema allowlist (AST)
-│   ├── agent/
-│   │   ├── agent.py                 # LLM call, prompt strategies, self-correction loop (Langfuse traced)
-│   │   ├── few_shot.py              # Static and dynamic (embedding-based) example selection
-│   │   ├── schema_retriever.py      # RAG schema linking: embeds question, retrieves top-K tables
-│   │   └── router.py                # Difficulty classifier: rule-based + embedding k-NN → model + strategy
-│   ├── evals/
-│   │   ├── tasks.py                 # Inspect AI Task, Dataset, Solver
-│   │   └── scorers.py               # syntax_valid, execution_ok, result_match, semantic_judge, custom metrics
-│   └── utils/
-│       └── db.py                    # DuckDB connection, seeding, schema string
-└── pyproject.toml
+│   ├── api/                         # FastAPI service
+│   ├── agent/                       # LLM call, strategies, few-shot, RAG, router
+│   ├── evals/                       # Inspect AI tasks and scorers
+│   ├── guardrails/                  # input + output guardrails
+│   └── utils/db.py                  # DuckDB connection and seeding
+└── tests/                           # pytest — guardrails + adversarial
 ```
 
 ---
@@ -759,12 +158,10 @@ notebooks/
 
 | Package | Role |
 |---|---|
-| [fastapi](https://fastapi.tiangolo.com) | HTTP service layer — exposes agent and evals as REST endpoints |
-| [uvicorn](https://www.uvicorn.org) | ASGI server that runs the FastAPI app |
+| [fastapi](https://fastapi.tiangolo.com) | HTTP service layer |
 | [inspect-ai](https://inspect.ai) | Eval harness — tasks, solvers, scorers, logging |
 | [litellm](https://docs.litellm.ai) | Unified interface to OpenAI, Anthropic, and other providers |
-| [duckdb](https://duckdb.org) | In-process SQL engine for the test database |
+| [duckdb](https://duckdb.org) | In-process SQL engine |
 | [sqlglot](https://github.com/tobymao/sqlglot) | SQL parser for syntax validation and output guardrails |
+| [dspy-ai](https://dspy.ai) | Prompt optimization |
 | [langfuse](https://langfuse.com) | Observability and tracing (optional) |
-| [pydantic](https://docs.pydantic.dev) | Request/response validation for the FastAPI layer |
-| [dspy-ai](https://dspy.ai) | Prompt optimization — compiles few-shot demos from training data using a real execution metric |

@@ -14,267 +14,374 @@
         49.95
       ]
     ],
-    "id": "sq042"
+    "id": "sq003"
   },
   {
-    "question": "Which customers have spent the most money in total and what is their total spending?",
-    "sql": "SELECT c.id, c.name, SUM(oi.quantity * oi.unit_price) AS total_spent FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' GROUP BY c.id, c.name ORDER BY total_spent DESC LIMIT 10",
-    "difficulty": "medium",
-    "notes": "Aggregation and ordering to find top spenders",
+    "question": "List the top 5 customers by the number of orders placed and their total spent amount.",
+    "sql": "SELECT c.id, c.name, COUNT(o.id) AS order_count, SUM(oi.quantity * oi.unit_price) AS total_spent FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id GROUP BY c.id, c.name ORDER BY total_spent DESC LIMIT 5",
+    "difficulty": "hard",
+    "notes": "Multiple joins and aggregation",
     "expected_rows": [
       [
         1,
         "Alice Martin",
+        5,
         599.92
-      ],
-      [
-        2,
-        "Bob Schmidt",
-        384.92
-      ],
-      [
-        4,
-        "David Chen",
-        114.98
-      ],
-      [
-        7,
-        "Grace Kim",
-        99.96
-      ],
-      [
-        6,
-        "Frank M\u00fcller",
-        89.99
-      ],
-      [
-        9,
-        "Iris Patel",
-        79.99
       ],
       [
         3,
         "Clara Sousa",
-        69.98
-      ]
-    ],
-    "id": "sq016"
-  },
-  {
-    "question": "What is the distribution of order statuses for customers from Canada?",
-    "sql": "SELECT o.status, COUNT(o.id) AS status_count FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.country = 'Canada' GROUP BY o.status",
-    "difficulty": "medium",
-    "notes": "Aggregation by status for a specific country",
-    "expected_rows": [
-      [
-        "completed",
-        1
-      ]
-    ],
-    "id": "sq008"
-  },
-  {
-    "question": "Which product categories have the highest average price and total sales?",
-    "sql": "SELECT p.category, AVG(p.price) AS average_price, SUM(oi.quantity * oi.unit_price) AS total_sales FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY p.category ORDER BY average_price DESC",
-    "difficulty": "hard",
-    "notes": "Grouped by category with multiple aggregations",
-    "expected_rows": [
-      [
-        "Furniture",
-        123.32,
-        404.96
-      ],
-      [
-        "Electronics",
-        87.99,
-        959.88
-      ],
-      [
-        "Stationery",
-        8.32,
-        74.9
-      ]
-    ],
-    "id": "sq020"
-  },
-  {
-    "question": "Which products have been ordered but never completed in any order?",
-    "sql": "SELECT p.name FROM products p WHERE p.id IN (SELECT oi.product_id FROM order_items oi JOIN orders o ON oi.order_id = o.id WHERE o.status != 'completed') GROUP BY p.name;",
-    "difficulty": "medium",
-    "notes": "Finds products that have been part of orders but not completed",
-    "expected_rows": [
-      [
-        "Monitor 27\""
-      ],
-      [
-        "Ergonomic Chair"
-      ],
-      [
-        "Standing Desk"
-      ]
-    ],
-    "id": "sq033"
-  },
-  {
-    "question": "Which products have the highest total sales in terms of revenue, and how many orders were placed for those products?",
-    "sql": "SELECT p.name, SUM(oi.quantity * oi.unit_price) AS total_revenue, COUNT(DISTINCT o.id) AS total_orders FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY p.name ORDER BY total_revenue DESC LIMIT 10;",
-    "difficulty": "medium",
-    "notes": "Focuses on sales performance of products with filtering on order status",
-    "expected_rows": [
-      [
-        "Monitor 27\"",
-        349.99,
-        1
-      ],
-      [
-        "Ergonomic Chair",
-        299.99,
-        1
-      ],
-      [
-        "Mechanical Keyboard",
-        179.98,
-        2
-      ],
-      [
-        "Webcam HD",
-        159.98,
-        2
-      ],
-      [
-        "USB-C Hub",
-        149.97,
-        2
-      ],
-      [
-        "Wireless Mouse",
-        119.96,
-        3
-      ],
-      [
-        "Desk Lamp",
-        104.97,
-        2
-      ],
-      [
-        "Notebook (A5)",
-        49.95,
-        2
-      ],
-      [
-        "Ballpoint Pens 10pk",
-        24.95,
-        1
-      ]
-    ],
-    "id": "sq030"
-  },
-  {
-    "question": "Which products have been ordered but not returned (assuming 'cancelled' status means returned), and what is their total revenue?",
-    "sql": "SELECT p.name, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status != 'cancelled' GROUP BY p.name;",
-    "difficulty": "medium",
-    "notes": "Filtering based on order status",
-    "expected_rows": [
-      [
-        "Monitor 27\"",
-        699.98
-      ],
-      [
-        "Wireless Mouse",
-        119.96
-      ],
-      [
-        "Desk Lamp",
-        104.97
-      ],
-      [
-        "Notebook (A5)",
-        49.95
-      ],
-      [
-        "USB-C Hub",
-        149.97
-      ],
-      [
-        "Ballpoint Pens 10pk",
-        24.95
-      ],
-      [
-        "Standing Desk",
-        499.99
-      ],
-      [
-        "Mechanical Keyboard",
-        179.98
-      ],
-      [
-        "Ergonomic Chair",
-        299.99
-      ],
-      [
-        "Webcam HD",
-        159.98
-      ]
-    ],
-    "id": "sq006"
-  },
-  {
-    "question": "Find the month with the highest total sales revenue.",
-    "sql": "SELECT DATE_TRUNC('month', o.order_date) AS sales_month, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM orders o JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' GROUP BY sales_month ORDER BY total_revenue DESC LIMIT 1",
-    "difficulty": "medium",
-    "notes": "Date truncation and aggregation",
-    "expected_rows": [
-      [
-        "2024-01-01T00:00:00",
-        419.97
-      ]
-    ],
-    "id": "sq049"
-  },
-  {
-    "question": "List the top 5 customers by total amount spent and their country, excluding those who have cancelled any orders.",
-    "sql": "SELECT c.id, c.name, c.country, SUM(oi.quantity * oi.unit_price) AS total_spent FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status != 'cancelled' GROUP BY c.id, c.name, c.country ORDER BY total_spent DESC LIMIT 5;",
-    "difficulty": "hard",
-    "notes": "Excludes customers with cancelled orders and ranks them by total spending",
-    "expected_rows": [
-      [
-        1,
-        "Alice Martin",
-        "USA",
-        599.92
+        2,
+        569.97
       ],
       [
         10,
         "James Wilson",
-        "USA",
+        1,
         499.99
       ],
       [
         2,
         "Bob Schmidt",
-        "Germany",
+        3,
         384.92
       ],
       [
         5,
         "Eva Rossi",
-        "Italy",
+        1,
         349.99
+      ]
+    ],
+    "id": "sq001"
+  },
+  {
+    "question": "Which products have been ordered the most and what is the total quantity sold for each?",
+    "sql": "SELECT p.name, SUM(oi.quantity) AS total_quantity FROM order_items oi JOIN products p ON oi.product_id = p.id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY p.name ORDER BY total_quantity DESC",
+    "difficulty": "medium",
+    "notes": "Multiple joins with aggregation and ordering",
+    "expected_rows": [
+      [
+        "Ballpoint Pens 10pk",
+        5
+      ],
+      [
+        "Notebook (A5)",
+        5
+      ],
+      [
+        "Wireless Mouse",
+        4
+      ],
+      [
+        "USB-C Hub",
+        3
+      ],
+      [
+        "Desk Lamp",
+        3
+      ],
+      [
+        "Mechanical Keyboard",
+        2
+      ],
+      [
+        "Webcam HD",
+        2
+      ],
+      [
+        "Ergonomic Chair",
+        1
+      ],
+      [
+        "Monitor 27\"",
+        1
+      ]
+    ],
+    "id": "sq020"
+  },
+  {
+    "question": "Which products have been sold the most in terms of quantity, along with their total sales revenue?",
+    "sql": "SELECT p.name, SUM(oi.quantity) as total_quantity, SUM(oi.quantity * oi.unit_price) as total_revenue FROM order_items oi JOIN products p ON oi.product_id = p.id GROUP BY p.name ORDER BY total_quantity DESC",
+    "difficulty": "medium",
+    "notes": "Aggregates quantity and revenue per product",
+    "expected_rows": [
+      [
+        "Ballpoint Pens 10pk",
+        5,
+        24.95
+      ],
+      [
+        "Notebook (A5)",
+        5,
+        49.95
+      ],
+      [
+        "Wireless Mouse",
+        4,
+        119.96
+      ],
+      [
+        "USB-C Hub",
+        3,
+        149.97
+      ],
+      [
+        "Desk Lamp",
+        3,
+        104.97
+      ],
+      [
+        "Standing Desk",
+        2,
+        999.98
+      ],
+      [
+        "Monitor 27\"",
+        2,
+        699.98
+      ],
+      [
+        "Mechanical Keyboard",
+        2,
+        179.98
+      ],
+      [
+        "Ergonomic Chair",
+        2,
+        599.98
+      ],
+      [
+        "Webcam HD",
+        2,
+        159.98
+      ]
+    ],
+    "id": "sq016"
+  },
+  {
+    "question": "Which products have been sold the most, and what is the total revenue generated from them?",
+    "sql": "SELECT p.name, SUM(oi.quantity) AS total_quantity, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM order_items oi JOIN products p ON oi.product_id = p.id GROUP BY p.name ORDER BY total_revenue DESC LIMIT 10",
+    "difficulty": "medium",
+    "notes": "Aggregates sales data and sorts by revenue",
+    "expected_rows": [
+      [
+        "Standing Desk",
+        2,
+        999.98
+      ],
+      [
+        "Monitor 27\"",
+        2,
+        699.98
+      ],
+      [
+        "Ergonomic Chair",
+        2,
+        599.98
+      ],
+      [
+        "Mechanical Keyboard",
+        2,
+        179.98
+      ],
+      [
+        "Webcam HD",
+        2,
+        159.98
+      ],
+      [
+        "USB-C Hub",
+        3,
+        149.97
+      ],
+      [
+        "Wireless Mouse",
+        4,
+        119.96
+      ],
+      [
+        "Desk Lamp",
+        3,
+        104.97
+      ],
+      [
+        "Notebook (A5)",
+        5,
+        49.95
+      ],
+      [
+        "Ballpoint Pens 10pk",
+        5,
+        24.95
+      ]
+    ],
+    "id": "sq006"
+  },
+  {
+    "question": "Identify the top 5 customers by total spending in the last year, along with their email and country.",
+    "sql": "SELECT c.id, c.name, c.email, c.country, SUM(oi.quantity * oi.unit_price) AS total_spent FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.order_date >= DATE '2022-10-01' AND o.status = 'completed' GROUP BY c.id, c.name, c.email, c.country ORDER BY total_spent DESC LIMIT 5",
+    "difficulty": "hard",
+    "notes": "Involves filtering by date, multiple JOINs, and ordering by total spending",
+    "expected_rows": [
+      [
+        1,
+        "Alice Martin",
+        "alice@email.com",
+        "USA",
+        599.92
+      ],
+      [
+        2,
+        "Bob Schmidt",
+        "bob@email.com",
+        "Germany",
+        384.92
       ],
       [
         4,
         "David Chen",
+        "david@email.com",
         "Canada",
         114.98
+      ],
+      [
+        7,
+        "Grace Kim",
+        "grace@email.com",
+        "USA",
+        99.96
+      ],
+      [
+        6,
+        "Frank M\u00fcller",
+        "frank@email.com",
+        "Germany",
+        89.99
       ]
     ],
-    "id": "sq031"
+    "id": "sq012"
   },
   {
-    "question": "What is the average order value for customers who signed up in the last year?",
-    "sql": "SELECT AVG(order_total) AS average_order_value FROM (SELECT SUM(oi.quantity * oi.unit_price) AS order_total FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE c.signup_date >= CURRENT_DATE - INTERVAL '1 year' AND o.status = 'completed' GROUP BY o.id) AS subquery",
-    "difficulty": "hard",
-    "notes": "Subquery with aggregation based on signup date",
+    "question": "List the customers who have not made any purchases in the last year along with their signup date.",
+    "sql": "SELECT c.name, c.signup_date FROM customers c LEFT JOIN orders o ON c.id = o.customer_id AND o.order_date >= DATE_TRUNC('year', CURRENT_DATE) - INTERVAL '1 year' WHERE o.id IS NULL",
+    "difficulty": "medium",
+    "notes": "Using LEFT JOIN to find customers without orders",
+    "expected_rows": [
+      [
+        "Alice Martin",
+        "2023-01-15"
+      ],
+      [
+        "Bob Schmidt",
+        "2023-03-22"
+      ],
+      [
+        "Clara Sousa",
+        "2023-06-10"
+      ],
+      [
+        "David Chen",
+        "2023-07-04"
+      ],
+      [
+        "Eva Rossi",
+        "2023-09-18"
+      ],
+      [
+        "Frank M\u00fcller",
+        "2024-01-02"
+      ],
+      [
+        "Grace Kim",
+        "2024-02-14"
+      ],
+      [
+        "Hugo Dubois",
+        "2024-03-30"
+      ],
+      [
+        "Iris Patel",
+        "2024-05-05"
+      ],
+      [
+        "James Wilson",
+        "2024-08-20"
+      ]
+    ],
+    "id": "sq007"
+  },
+  {
+    "question": "What is the total revenue per category for customers in the USA?",
+    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category;",
+    "difficulty": "medium",
+    "notes": "JOIN across 4 tables with aggregation",
+    "expected_rows": [
+      [
+        "Electronics",
+        649.93
+      ],
+      [
+        "Stationery",
+        49.95
+      ]
+    ],
+    "id": "sq009"
+  },
+  {
+    "question": "Which customers have not made any orders in the last 6 months and their signup dates?",
+    "sql": "SELECT c.name, c.signup_date FROM customers c LEFT JOIN orders o ON c.id = o.customer_id AND o.order_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '6 month' WHERE o.id IS NULL",
+    "difficulty": "medium",
+    "notes": "Uses LEFT JOIN to find customers without recent orders",
+    "expected_rows": [
+      [
+        "Alice Martin",
+        "2023-01-15"
+      ],
+      [
+        "Bob Schmidt",
+        "2023-03-22"
+      ],
+      [
+        "Clara Sousa",
+        "2023-06-10"
+      ],
+      [
+        "David Chen",
+        "2023-07-04"
+      ],
+      [
+        "Eva Rossi",
+        "2023-09-18"
+      ],
+      [
+        "Frank M\u00fcller",
+        "2024-01-02"
+      ],
+      [
+        "Grace Kim",
+        "2024-02-14"
+      ],
+      [
+        "Hugo Dubois",
+        "2024-03-30"
+      ],
+      [
+        "Iris Patel",
+        "2024-05-05"
+      ],
+      [
+        "James Wilson",
+        "2024-08-20"
+      ]
+    ],
+    "id": "sq017"
+  },
+  {
+    "question": "What is the total amount spent by customers from Canada on completed orders in 2023?",
+    "sql": "SELECT SUM(oi.quantity * oi.unit_price) AS total_spent FROM orders o JOIN customers c ON o.customer_id = c.id JOIN order_items oi ON o.id = oi.order_id WHERE c.country = 'Canada' AND o.status = 'completed' AND o.order_date BETWEEN '2023-01-01' AND '2023-12-31'",
+    "difficulty": "medium",
+    "notes": "JOIN across 3 tables with date filtering",
     "expected_rows": [
       [
         null
@@ -283,89 +390,39 @@
     "id": "sq019"
   },
   {
-    "question": "What is the total revenue per category for customers in the USA?",
-    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category",
+    "question": "How many completed orders were placed by customers from each country in the last year?",
+    "sql": "SELECT c.country, COUNT(o.id) AS completed_orders FROM customers c JOIN orders o ON c.id = o.customer_id WHERE o.status = 'completed' AND o.order_date >= DATE '2022-01-01' GROUP BY c.country",
     "difficulty": "medium",
-    "notes": "JOIN across 4 tables with aggregation",
+    "notes": "JOIN across 2 tables with filtering and aggregation",
     "expected_rows": [
       [
-        "Electronics",
-        649.93
-      ],
-      [
-        "Stationery",
-        49.95
-      ]
-    ],
-    "id": "sq023"
-  },
-  {
-    "question": "Which products have been ordered the most in the last month, and how many times were they ordered?",
-    "sql": "SELECT p.name, SUM(oi.quantity) AS total_ordered FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.order_date >= DATE '2023-09-01' AND o.status = 'completed' GROUP BY p.name ORDER BY total_ordered DESC;",
-    "difficulty": "medium",
-    "notes": "Focus on time series and aggregation",
-    "expected_rows": [
-      [
-        "Notebook (A5)",
+        "USA",
         5
       ],
       [
-        "Ballpoint Pens 10pk",
-        5
-      ],
-      [
-        "Wireless Mouse",
-        4
-      ],
-      [
-        "Desk Lamp",
-        3
-      ],
-      [
-        "USB-C Hub",
-        3
-      ],
-      [
-        "Mechanical Keyboard",
-        2
-      ],
-      [
-        "Webcam HD",
-        2
-      ],
-      [
-        "Monitor 27\"",
+        "Brazil",
         1
       ],
       [
-        "Ergonomic Chair",
+        "Germany",
+        3
+      ],
+      [
+        "India",
+        1
+      ],
+      [
+        "Canada",
         1
       ]
     ],
-    "id": "sq002"
+    "id": "sq014"
   },
   {
-    "question": "What is the total revenue per category for customers in the USA?",
-    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category",
+    "question": "Which customers have not made any purchases in the last year?",
+    "sql": "SELECT c.name, c.email FROM customers c LEFT JOIN orders o ON c.id = o.customer_id AND o.order_date >= CURRENT_DATE - INTERVAL '1 year' WHERE o.id IS NULL;",
     "difficulty": "medium",
-    "notes": "JOIN across 4 tables with aggregation",
-    "expected_rows": [
-      [
-        "Electronics",
-        649.93
-      ],
-      [
-        "Stationery",
-        49.95
-      ]
-    ],
-    "id": "sq015"
-  },
-  {
-    "question": "Find customers who have not made any orders in the last year.",
-    "sql": "SELECT c.name, c.email FROM customers c LEFT JOIN orders o ON c.id = o.customer_id AND o.order_date >= CURRENT_DATE - INTERVAL '1 year' WHERE o.id IS NULL",
-    "difficulty": "medium",
-    "notes": "LEFT JOIN to find customers without recent orders",
+    "notes": "LEFT JOIN with filtering",
     "expected_rows": [
       [
         "Alice Martin",
@@ -408,514 +465,67 @@
         "james@email.com"
       ]
     ],
-    "id": "sq021"
+    "id": "sq010"
   },
   {
-    "question": "What is the total revenue generated by each customer, ordered by revenue descending?",
-    "sql": "SELECT c.name, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' GROUP BY c.name ORDER BY total_revenue DESC",
-    "difficulty": "medium",
-    "notes": "JOIN across 3 tables with aggregation on revenue",
-    "expected_rows": [
-      [
-        "Alice Martin",
-        599.92
-      ],
-      [
-        "Bob Schmidt",
-        384.92
-      ],
-      [
-        "David Chen",
-        114.98
-      ],
-      [
-        "Grace Kim",
-        99.96
-      ],
-      [
-        "Frank M\u00fcller",
-        89.99
-      ],
-      [
-        "Iris Patel",
-        79.99
-      ],
-      [
-        "Clara Sousa",
-        69.98
-      ]
-    ],
-    "id": "sq026"
-  },
-  {
-    "question": "Identify customers who have never placed a completed order.",
-    "sql": "SELECT c.id, c.name FROM customers c LEFT JOIN orders o ON c.id = o.customer_id AND o.status = 'completed' WHERE o.id IS NULL;",
+    "question": "Which products have been ordered the most and what is the total revenue generated from those products?",
+    "sql": "SELECT p.name, SUM(oi.quantity) AS total_quantity, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM order_items oi JOIN products p ON oi.product_id = p.id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY p.name ORDER BY total_quantity DESC LIMIT 10",
     "difficulty": "hard",
-    "notes": "Using LEFT JOIN to find customers without completed orders",
+    "notes": "Multiple JOINs with aggregation and filtering",
     "expected_rows": [
       [
+        "Notebook (A5)",
         5,
-        "Eva Rossi"
+        49.95
       ],
       [
-        8,
-        "Hugo Dubois"
+        "Ballpoint Pens 10pk",
+        5,
+        24.95
       ],
       [
-        10,
-        "James Wilson"
-      ]
-    ],
-    "id": "sq040"
-  },
-  {
-    "question": "What is the highest-priced product sold in each category?",
-    "sql": "SELECT p.category, MAX(p.price) AS highest_price FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY p.category;",
-    "difficulty": "medium",
-    "notes": "Aggregation with grouping by category",
-    "expected_rows": [
-      [
-        "Furniture",
-        299.99
+        "Wireless Mouse",
+        4,
+        119.96
       ],
-      [
-        "Electronics",
-        349.99
-      ],
-      [
-        "Stationery",
-        9.99
-      ]
-    ],
-    "id": "sq012"
-  },
-  {
-    "question": "Which products have been ordered the most times by customers from Canada?",
-    "sql": "SELECT p.name, SUM(oi.quantity) AS total_quantity FROM order_items oi JOIN orders o ON oi.order_id = o.id JOIN customers c ON o.customer_id = c.id JOIN products p ON oi.product_id = p.id WHERE c.country = 'Canada' GROUP BY p.name ORDER BY total_quantity DESC;",
-    "difficulty": "medium",
-    "notes": "Multiple JOINs with grouping and ordering",
-    "expected_rows": [
       [
         "Desk Lamp",
-        1
+        3,
+        104.97
+      ],
+      [
+        "USB-C Hub",
+        3,
+        149.97
+      ],
+      [
+        "Mechanical Keyboard",
+        2,
+        179.98
       ],
       [
         "Webcam HD",
-        1
-      ]
-    ],
-    "id": "sq038"
-  },
-  {
-    "question": "List the top 5 customers by total spending along with their country.",
-    "sql": "SELECT c.id, c.name, c.country, SUM(oi.quantity * oi.unit_price) AS total_spending FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' GROUP BY c.id, c.name, c.country ORDER BY total_spending DESC LIMIT 5;",
-    "difficulty": "hard",
-    "notes": "Aggregating customer spending and limiting results",
-    "expected_rows": [
-      [
-        1,
-        "Alice Martin",
-        "USA",
-        599.92
-      ],
-      [
         2,
-        "Bob Schmidt",
-        "Germany",
-        384.92
+        159.98
       ],
       [
-        4,
-        "David Chen",
-        "Canada",
-        114.98
+        "Monitor 27\"",
+        1,
+        349.99
       ],
       [
-        7,
-        "Grace Kim",
-        "USA",
-        99.96
-      ],
-      [
-        6,
-        "Frank M\u00fcller",
-        "Germany",
-        89.99
-      ]
-    ],
-    "id": "sq014"
-  },
-  {
-    "question": "What is the total revenue per category for customers in the USA?",
-    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category;",
-    "difficulty": "medium",
-    "notes": "JOIN across 4 tables with aggregation",
-    "expected_rows": [
-      [
-        "Electronics",
-        649.93
-      ],
-      [
-        "Stationery",
-        49.95
-      ]
-    ],
-    "id": "sq034"
-  },
-  {
-    "question": "Which customers have never placed a completed order?",
-    "sql": "SELECT c.id, c.name FROM customers c LEFT JOIN orders o ON c.id = o.customer_id AND o.status = 'completed' WHERE o.id IS NULL;",
-    "difficulty": "medium",
-    "notes": "Using LEFT JOIN to find customers without completed orders",
-    "expected_rows": [
-      [
-        5,
-        "Eva Rossi"
-      ],
-      [
-        8,
-        "Hugo Dubois"
-      ],
-      [
-        10,
-        "James Wilson"
-      ]
-    ],
-    "id": "sq013"
-  },
-  {
-    "question": "What is the total revenue generated by each product category for cancelled orders?",
-    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM order_items oi JOIN orders o ON oi.order_id = o.id JOIN products p ON oi.product_id = p.id WHERE o.status = 'cancelled' GROUP BY p.category;",
-    "difficulty": "medium",
-    "notes": "Aggregation with filtering based on order status",
-    "expected_rows": [
-      [
-        "Furniture",
-        799.98
-      ]
-    ],
-    "id": "sq041"
-  },
-  {
-    "question": "What is the total revenue per category for customers in the USA?",
-    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category",
-    "difficulty": "medium",
-    "notes": "JOIN across 4 tables with aggregation",
-    "expected_rows": [
-      [
-        "Electronics",
-        649.93
-      ],
-      [
-        "Stationery",
-        49.95
-      ]
-    ],
-    "id": "sq007"
-  },
-  {
-    "question": "What is the total revenue per category for customers in the USA?",
-    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category",
-    "difficulty": "medium",
-    "notes": "JOIN across 4 tables with aggregation",
-    "expected_rows": [
-      [
-        "Electronics",
-        649.93
-      ],
-      [
-        "Stationery",
-        49.95
+        "Ergonomic Chair",
+        1,
+        299.99
       ]
     ],
     "id": "sq018"
   },
   {
-    "question": "What percentage of total orders have been completed vs pending for each customer?",
-    "sql": "SELECT c.id, c.name, SUM(CASE WHEN o.status = 'completed' THEN 1 ELSE 0 END) * 100.0 / COUNT(o.id) AS completed_percentage FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.id, c.name",
+    "question": "Which products have the highest total revenue generated from completed orders in the last quarter?",
+    "sql": "SELECT p.name, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' AND o.order_date >= DATE '2023-07-01' GROUP BY p.name ORDER BY total_revenue DESC",
     "difficulty": "hard",
-    "notes": "Percentage calculation using conditional aggregation",
-    "expected_rows": [
-      [
-        4,
-        "David Chen",
-        100.0
-      ],
-      [
-        8,
-        "Hugo Dubois",
-        0.0
-      ],
-      [
-        10,
-        "James Wilson",
-        0.0
-      ],
-      [
-        2,
-        "Bob Schmidt",
-        100.0
-      ],
-      [
-        9,
-        "Iris Patel",
-        100.0
-      ],
-      [
-        1,
-        "Alice Martin",
-        100.0
-      ],
-      [
-        7,
-        "Grace Kim",
-        100.0
-      ],
-      [
-        3,
-        "Clara Sousa",
-        50.0
-      ],
-      [
-        5,
-        "Eva Rossi",
-        0.0
-      ],
-      [
-        6,
-        "Frank M\u00fcller",
-        100.0
-      ]
-    ],
-    "id": "sq045"
-  },
-  {
-    "question": "What percentage of orders are completed versus pending for each customer?",
-    "sql": "SELECT c.id, c.name, COUNT(CASE WHEN o.status = 'completed' THEN 1 END) * 100.0 / COUNT(o.id) AS completed_percentage FROM customers c LEFT JOIN orders o ON c.id = o.customer_id GROUP BY c.id, c.name HAVING COUNT(o.id) > 0",
-    "difficulty": "hard",
-    "notes": "Conditional aggregation with HAVING",
-    "expected_rows": [
-      [
-        4,
-        "David Chen",
-        100.0
-      ],
-      [
-        8,
-        "Hugo Dubois",
-        0.0
-      ],
-      [
-        10,
-        "James Wilson",
-        0.0
-      ],
-      [
-        2,
-        "Bob Schmidt",
-        100.0
-      ],
-      [
-        9,
-        "Iris Patel",
-        100.0
-      ],
-      [
-        3,
-        "Clara Sousa",
-        50.0
-      ],
-      [
-        5,
-        "Eva Rossi",
-        0.0
-      ],
-      [
-        6,
-        "Frank M\u00fcller",
-        100.0
-      ],
-      [
-        1,
-        "Alice Martin",
-        100.0
-      ],
-      [
-        7,
-        "Grace Kim",
-        100.0
-      ]
-    ],
-    "id": "sq048"
-  },
-  {
-    "question": "How many orders were placed each month in the last year, and what percentage were completed?",
-    "sql": "SELECT strftime('%Y-%m', o.order_date) AS month, COUNT(o.id) AS total_orders, SUM(CASE WHEN o.status = 'completed' THEN 1 ELSE 0 END) AS completed_orders, (SUM(CASE WHEN o.status = 'completed' THEN 1 ELSE 0 END) * 100.0 / COUNT(o.id)) AS completed_percentage FROM orders o WHERE o.order_date >= DATE '2022-10-01' GROUP BY month;",
-    "difficulty": "hard",
-    "notes": "Time series analysis with conditional aggregation",
-    "expected_rows": [
-      [
-        "2024-09",
-        1,
-        1,
-        100.0
-      ],
-      [
-        "2024-10",
-        1,
-        1,
-        100.0
-      ],
-      [
-        "2024-03",
-        2,
-        1,
-        50.0
-      ],
-      [
-        "2024-05",
-        1,
-        1,
-        100.0
-      ],
-      [
-        "2024-08",
-        1,
-        0,
-        0.0
-      ],
-      [
-        "2024-01",
-        2,
-        2,
-        100.0
-      ],
-      [
-        "2024-06",
-        2,
-        1,
-        50.0
-      ],
-      [
-        "2024-02",
-        2,
-        1,
-        50.0
-      ],
-      [
-        "2024-04",
-        2,
-        2,
-        100.0
-      ],
-      [
-        "2024-07",
-        1,
-        1,
-        100.0
-      ]
-    ],
-    "id": "sq004"
-  },
-  {
-    "question": "What is the total revenue per category for customers in the USA?",
-    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category",
-    "difficulty": "medium",
-    "notes": "JOIN across 4 tables with aggregation",
-    "expected_rows": [
-      [
-        "Electronics",
-        649.93
-      ],
-      [
-        "Stationery",
-        49.95
-      ]
-    ],
-    "id": "sq028"
-  },
-  {
-    "question": "What is the distribution of order statuses for customers from Canada?",
-    "sql": "SELECT o.status, COUNT(o.id) AS status_count FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.country = 'Canada' GROUP BY o.status",
-    "difficulty": "medium",
-    "notes": "Count of orders grouped by status for a specific country",
-    "expected_rows": [
-      [
-        "completed",
-        1
-      ]
-    ],
-    "id": "sq022"
-  },
-  {
-    "question": "Which product category has the highest average quantity sold per order for completed orders?",
-    "sql": "SELECT p.category, AVG(oi.quantity) AS avg_quantity_sold FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY p.category ORDER BY avg_quantity_sold DESC LIMIT 1;",
-    "difficulty": "medium",
-    "notes": "Focuses on average quantity sold by product category with filtering on order status",
-    "expected_rows": [
-      [
-        "Stationery",
-        3.33
-      ]
-    ],
-    "id": "sq032"
-  },
-  {
-    "question": "What is the total revenue per category for customers in the USA?",
-    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category;",
-    "difficulty": "medium",
-    "notes": "JOIN across 4 tables with aggregation",
-    "expected_rows": [
-      [
-        "Electronics",
-        649.93
-      ],
-      [
-        "Stationery",
-        49.95
-      ]
-    ],
-    "id": "sq011"
-  },
-  {
-    "question": "What is the maximum price of products ordered per category?",
-    "sql": "SELECT p.category, MAX(oi.unit_price) AS max_price FROM order_items oi JOIN products p ON oi.product_id = p.id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY p.category",
-    "difficulty": "medium",
-    "notes": "Aggregation to find maximum price by category",
-    "expected_rows": [
-      [
-        "Electronics",
-        349.99
-      ],
-      [
-        "Stationery",
-        9.99
-      ],
-      [
-        "Furniture",
-        299.99
-      ]
-    ],
-    "id": "sq009"
-  },
-  {
-    "question": "What is the average order value for customers from Canada, and how does it compare to customers from the UK?",
-    "sql": "SELECT c.country, AVG(oi.quantity * oi.unit_price) AS avg_order_value FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE c.country IN ('Canada', 'UK') AND o.status = 'completed' GROUP BY c.country;",
-    "difficulty": "medium",
-    "notes": "Comparative analysis with aggregation",
-    "expected_rows": [
-      [
-        "Canada",
-        57.49
-      ]
-    ],
-    "id": "sq003"
-  },
-  {
-    "question": "What are the top 5 most expensive products sold in completed orders?",
-    "sql": "SELECT p.name, MAX(oi.unit_price) AS max_price FROM order_items oi JOIN orders o ON oi.order_id = o.id JOIN products p ON oi.product_id = p.id WHERE o.status = 'completed' GROUP BY p.name ORDER BY max_price DESC LIMIT 5",
-    "difficulty": "hard",
-    "notes": "Finding maximum prices with aggregation and filtering",
+    "notes": "JOIN across 3 tables with filtering, aggregation, and sorting",
     "expected_rows": [
       [
         "Monitor 27\"",
@@ -927,174 +537,70 @@
       ],
       [
         "Mechanical Keyboard",
-        89.99
+        179.98
       ],
       [
         "Webcam HD",
-        79.99
+        159.98
       ],
       [
         "USB-C Hub",
-        49.99
-      ]
-    ],
-    "id": "sq027"
-  },
-  {
-    "question": "Find the product that has the highest number of orders but the lowest total revenue.",
-    "sql": "SELECT p.id, p.name, COUNT(oi.order_id) AS order_count, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY p.id, p.name ORDER BY order_count DESC, total_revenue ASC LIMIT 1",
-    "difficulty": "hard",
-    "notes": "Complex ordering with multiple aggregations",
-    "expected_rows": [
+        149.97
+      ],
       [
-        1,
         "Wireless Mouse",
-        3,
         119.96
-      ]
-    ],
-    "id": "sq044"
-  },
-  {
-    "question": "What is the total quantity sold for each product category since the store opened?",
-    "sql": "SELECT p.category, SUM(oi.quantity) AS total_quantity_sold FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed' GROUP BY p.category;",
-    "difficulty": "medium",
-    "notes": "Aggregate quantity sold by category",
-    "expected_rows": [
-      [
-        "Electronics",
-        12
-      ],
-      [
-        "Stationery",
-        10
-      ],
-      [
-        "Furniture",
-        4
-      ]
-    ],
-    "id": "sq035"
-  },
-  {
-    "question": "How many unique customers have purchased products from each category?",
-    "sql": "SELECT p.category, COUNT(DISTINCT c.id) AS unique_customers FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE o.status = 'completed' GROUP BY p.category",
-    "difficulty": "medium",
-    "notes": "Count unique customers with JOINs and aggregation",
-    "expected_rows": [
-      [
-        "Furniture",
-        3
-      ],
-      [
-        "Electronics",
-        6
-      ],
-      [
-        "Stationery",
-        3
-      ]
-    ],
-    "id": "sq024"
-  },
-  {
-    "question": "What is the total revenue per category for customers in the USA?",
-    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE c.country = 'USA' AND o.status = 'completed' GROUP BY p.category;",
-    "difficulty": "medium",
-    "notes": "JOIN across 4 tables with aggregation",
-    "expected_rows": [
-      [
-        "Electronics",
-        649.93
-      ],
-      [
-        "Stationery",
-        49.95
-      ]
-    ],
-    "id": "sq001"
-  },
-  {
-    "question": "Which products have been ordered the most in terms of quantity and who are the top customers for those products?",
-    "sql": "SELECT p.name AS product_name, c.name AS customer_name, SUM(oi.quantity) AS total_quantity FROM order_items oi JOIN products p ON oi.product_id = p.id JOIN orders o ON oi.order_id = o.id JOIN customers c ON o.customer_id = c.id GROUP BY p.name, c.name ORDER BY total_quantity DESC LIMIT 10",
-    "difficulty": "hard",
-    "notes": "Multiple JOINs with aggregation to find top products and customers.",
-    "expected_rows": [
-      [
-        "Ballpoint Pens 10pk",
-        "Bob Schmidt",
-        5
-      ],
-      [
-        "Notebook (A5)",
-        "Alice Martin",
-        3
-      ],
-      [
-        "Wireless Mouse",
-        "Bob Schmidt",
-        2
-      ],
-      [
-        "USB-C Hub",
-        "Alice Martin",
-        2
       ],
       [
         "Desk Lamp",
-        "Clara Sousa",
-        2
+        104.97
       ],
       [
         "Notebook (A5)",
-        "Grace Kim",
-        2
+        49.95
       ],
       [
-        "Standing Desk",
-        "Clara Sousa",
-        1
-      ],
-      [
-        "Webcam HD",
-        "Iris Patel",
-        1
-      ],
-      [
-        "Standing Desk",
-        "James Wilson",
-        1
-      ],
-      [
-        "Ergonomic Chair",
-        "Hugo Dubois",
-        1
+        "Ballpoint Pens 10pk",
+        24.95
       ]
     ],
-    "id": "sq050"
+    "id": "sq015"
   },
   {
-    "question": "Which product categories have the highest average price, and how many products are in each category?",
-    "sql": "SELECT p.category, AVG(p.price) AS avg_price, COUNT(p.id) AS product_count FROM products p GROUP BY p.category ORDER BY avg_price DESC;",
+    "question": "Which products have not been sold in the last 6 months?",
+    "sql": "SELECT p.id, p.name FROM products p LEFT JOIN order_items oi ON p.id = oi.product_id LEFT JOIN orders o ON oi.order_id = o.id AND o.status = 'completed' WHERE o.order_date < DATE '2023-04-01' OR o.id IS NULL",
     "difficulty": "medium",
-    "notes": "Aggregation and ordering",
+    "notes": "Uses LEFT JOIN to find unsold products with date filtering",
     "expected_rows": [
       [
-        "Furniture",
-        278.32,
-        3
+        6,
+        "Standing Desk"
       ],
       [
-        "Electronics",
-        119.99,
-        5
+        10,
+        "Monitor 27\""
       ],
       [
-        "Stationery",
-        7.49,
-        2
+        5,
+        "Ergonomic Chair"
+      ],
+      [
+        6,
+        "Standing Desk"
       ]
     ],
-    "id": "sq005"
+    "id": "sq013"
+  },
+  {
+    "question": "Find the average quantity of products ordered per order for completed orders.",
+    "sql": "SELECT AVG(total_quantity) AS avg_quantity_per_order FROM (SELECT o.id, SUM(oi.quantity) AS total_quantity FROM orders o JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'completed' GROUP BY o.id) AS order_totals",
+    "difficulty": "hard",
+    "notes": "Subquery with aggregation",
+    "expected_rows": [
+      [
+        2.36
+      ]
+    ],
+    "id": "sq008"
   }
 ]

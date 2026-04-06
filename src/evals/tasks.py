@@ -21,7 +21,7 @@ from inspect_ai.scorer import mean
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
 from src.agent.agent import PromptStrategy, extract_sql, generate_sql
-from src.evals.scorers import avg_attempts, avg_cost, avg_latency, avg_total_tokens, retrieval_recall, execution_ok, result_match, semantic_judge, syntax_valid
+from src.evals.scorers import avg_attempts, avg_cost, avg_latency, avg_total_tokens, avg_tool_calls, retrieval_recall, execution_ok, result_match, semantic_judge, syntax_valid
 from src.utils.db import get_schema_string
 
 GOLDEN_PATH = Path(__file__).parent.parent.parent / "datasets" / "golden" / "questions.json"
@@ -92,6 +92,8 @@ def text_to_sql_solver(
         state.metadata["model"] = result.model
         state.metadata["strategy"] = result.strategy
         state.metadata["reasoning"] = result.reasoning   # non-None for chain_of_thought
+        state.metadata["answer"] = result.answer         # non-None for tool_use
+        state.metadata["tool_calls"] = result.tool_calls # non-empty for tool_use
         state.metadata["prompt_tokens"] = result.prompt_tokens
         state.metadata["completion_tokens"] = result.completion_tokens
         state.metadata["langfuse_trace_id"] = result.trace_id
@@ -145,6 +147,7 @@ def text_to_sql(
             result_match(),
             semantic_judge(judge_model=judge_model),
             avg_attempts(),
+            avg_tool_calls(),
             avg_cost(),
             avg_latency(),
             avg_total_tokens(),

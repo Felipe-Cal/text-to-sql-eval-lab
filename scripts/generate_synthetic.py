@@ -1,9 +1,14 @@
 import json
 import random
 import os
+import sys
 from pathlib import Path
 import litellm
 from dotenv import load_dotenv
+
+# Ensure project root is on sys.path when run as:
+#   python scripts/generate_synthetic.py
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.utils.db import get_schema_string, execute_query
 from src.evals.scorers import _normalize_rows
