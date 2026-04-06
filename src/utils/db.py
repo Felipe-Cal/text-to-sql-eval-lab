@@ -111,8 +111,8 @@ INSERT INTO order_items VALUES
 """
 
 
-def get_connection(db_path: Path = DB_PATH) -> duckdb.DuckDBPyConnection:
-    return duckdb.connect(str(db_path))
+def get_connection(db_path: Path = DB_PATH, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    return duckdb.connect(str(db_path), read_only=read_only)
 
 
 def seed_database(db_path: Path = DB_PATH, force: bool = False) -> None:
@@ -160,7 +160,7 @@ Relationships:
 
 def execute_query(sql: str, db_path: Path = DB_PATH) -> list[tuple]:
     """Run a SQL query and return rows. Raises on error."""
-    con = get_connection(db_path)
+    con = get_connection(db_path, read_only=True)
     try:
         result = con.execute(sql).fetchall()
         return result

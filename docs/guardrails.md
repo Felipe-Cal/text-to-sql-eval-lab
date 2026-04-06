@@ -28,6 +28,14 @@ Run **after** the model returns SQL, **before** execution (`check_output`):
 
 Tests in [`tests/test_output_guardrails.py`](../tests/test_output_guardrails.py) cover valid `SELECT`s (including joins, CTEs, trailing `;`), and ensure DDL/DML / unknown tables are rejected.
 
+## Execution guardrails (`src/utils/db.py`)
+
+Run **during** database execution:
+
+| Check | What it does |
+|--------|----------------|
+| **Read-only Connection** | The `execute_query` utility connects to DuckDB with `read_only=True`. This provides an absolute, database-level guarantee that even if an LLM bypasses the AST output guardrails and generates a destructive statement (like `DROP` or `INSERT`), the database engine itself will violently reject the mutation. |
+
 ## Adversarial tests
 
 [`tests/test_guardrails_adversarial.py`](../tests/test_guardrails_adversarial.py) goes beyond happy paths: **evasion attempts** (obfuscated keywords, leetspeak, Unicode lookalikes, prompt-injection phrasing). Some cases are marked **`xfail`** — they document **known gaps** of regex/keyword input filtering (not silent failures).
