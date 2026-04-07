@@ -263,6 +263,8 @@ def _run_tool_use_loop(
     """
     from src.agent.tools import TOOL_SCHEMAS, execute_tool, ToolCallRecord
 
+    backend = get_completion_backend(model=model)
+
     messages = [
         {"role": "system", "content": TOOL_USE_SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -278,13 +280,15 @@ def _run_tool_use_loop(
     for iteration in range(max_iterations):
         iterations = iteration + 1
 
-        response = litellm.completion(
+        completion_kwargs = build_completion_kwargs(
+            backend,
             model=model,
             messages=messages,
             tools=TOOL_SCHEMAS,
             tool_choice="auto",   # LLM decides whether to call a tool or respond
             temperature=0,
         )
+        response = litellm.completion(**completion_kwargs)
 
         total_prompt_tokens += response.usage.prompt_tokens
         total_completion_tokens += response.usage.completion_tokens
@@ -461,7 +465,7 @@ def generate_sql(
     system_prompt = COT_SYSTEM_PROMPT if is_cot else SYSTEM_PROMPT
     user_template = COT_USER_PROMPT_TEMPLATE if is_cot else USER_PROMPT_TEMPLATE
 
-    backend = get_completion_backend()
+    backend = get_completion_backend(model=model)
 
     if backend.is_vllm and not is_cot:
         # KV-cache-friendly structure for vLLM: the [system, schema] prefix is identical
@@ -723,7 +727,7 @@ async def _arun_tool_use_loop(
         {"role": "user", "content": question},
     ]
 
-    backend = get_completion_backend()
+    backend = get_completion_backend(model=model)
     tool_calls_log: list[dict] = []
     last_sql: str = ""
     total_prompt_tokens = 0
@@ -905,7 +909,7 @@ async def agenerate_sql(
     system_prompt = COT_SYSTEM_PROMPT if is_cot else SYSTEM_PROMPT
     user_template = COT_USER_PROMPT_TEMPLATE if is_cot else USER_PROMPT_TEMPLATE
 
-    backend = get_completion_backend()
+    backend = get_completion_backend(model=model)
 
     if backend.is_vllm and not is_cot:
         messages = [
@@ -1126,7 +1130,7 @@ async def _arun_tool_use_loop_stream(
         {"role": "user", "content": question},
     ]
 
-    backend = get_completion_backend()
+    backend = get_completion_backend(model=model)
     tool_calls_log: list[dict] = []
     last_sql: str = ""
     total_prompt_tokens = 0
@@ -1315,7 +1319,7 @@ async def agenerate_sql_stream(
     few_shot_block = _build_few_shot_block(examples)
     system_prompt = COT_SYSTEM_PROMPT if is_cot else SYSTEM_PROMPT
     user_template = COT_USER_PROMPT_TEMPLATE if is_cot else USER_PROMPT_TEMPLATE
-    backend = get_completion_backend()
+    backend = get_completion_backend(model=model)
 
     if backend.is_vllm and not is_cot:
         base_messages = [

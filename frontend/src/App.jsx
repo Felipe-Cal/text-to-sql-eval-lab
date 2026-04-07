@@ -16,6 +16,14 @@ const STRATEGIES = [
   { group: 'Advanced',  id: 'routed',            label: 'Smart Router' },
 ];
 
+const MODELS = [
+  { group: 'OpenAI',    id: 'openai/gpt-4o',              label: 'GPT-4o' },
+  { group: 'OpenAI',    id: 'openai/gpt-4o-mini',         label: 'GPT-4o Mini' },
+  { group: 'Anthropic', id: 'anthropic/claude-sonnet-4-6',         label: 'Claude Sonnet 4.6' },
+  { group: 'Anthropic', id: 'anthropic/claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
+  { group: 'Local',     id: 'meta-llama/Meta-Llama-3.1-8B-Instruct', label: 'Llama 3.1 8B (vLLM)' },
+];
+
 const DIFFICULTIES = ['easy', 'medium', 'hard'];
 
 const TOOL_ICONS = {
@@ -26,7 +34,7 @@ const TOOL_ICONS = {
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
-function BackendBadge({ health }) {
+function BackendBadge({ health, selectedModel }) {
   if (!health) {
     return (
       <div className="backend-badge warn">
@@ -35,18 +43,14 @@ function BackendBadge({ health }) {
       </div>
     );
   }
-  const isVllm = health.backend === 'vllm';
   const isOk = health.status === 'ok';
-  const label = isVllm
-    ? `vLLM · ${(health.model || '').split('/').pop() || health.model}`
-    : `OpenAI · ${(health.model || '').split('/').pop() || 'default'}`;
+  // Derive a short display name from the selected model
+  const modelEntry = MODELS.find(m => m.id === selectedModel);
+  const label = modelEntry ? modelEntry.label : (selectedModel || '').split('/').pop();
   return (
     <div className={`backend-badge ${isOk ? 'ok' : 'err'}`}>
       <span className="backend-dot" />
       {label}
-      {health.latency_ms != null && (
-        <span style={{ opacity: 0.6, marginLeft: 4 }}>{health.latency_ms}ms</span>
-      )}
     </div>
   );
 }
@@ -217,6 +221,7 @@ export default function App() {
   }]);
   const [input, setInput] = useState('');
   const [chatStrategy, setChatStrategy] = useState('few_shot_dynamic');
+  const [chatModel, setChatModel] = useState('openai/gpt-4o-mini');
   const [isStreaming, setIsStreaming] = useState(false);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
@@ -228,6 +233,7 @@ export default function App() {
   // ── Eval state
   const [selectedDifficulties, setSelectedDifficulties] = useState(['hard']);
   const [selectedStrategies, setSelectedStrategies] = useState(['rag_hybrid', 'few_shot_dynamic']);
+  const [evalModel, setEvalModel] = useState('openai/gpt-4o-mini');
   const [expandedRows, setExpandedRows] = useState([]);
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'desc' });
   const activePolls = useRef({});
@@ -319,7 +325,7 @@ export default function App() {
       const resp = await fetch(`${API_BASE}/query/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, strategy: chatStrategy }),
+        body: JSON.stringify({ question, strategy: chatStrategy, model: chatModel }),
         signal: ctrl.signal,
       });
 
@@ -457,7 +463,7 @@ export default function App() {
         const res = await fetch(`${API_BASE}/evals/run`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ strategy: strat, difficulty: diff }),
+          body: JSON.stringify({ strategy: strat, difficulty: diff, model: evalModel }),
         });
         const data = await res.json();
         return { strat, diff, jobId: data.job_id, ok: true };
@@ -580,10 +586,15 @@ export default function App() {
     return <span>{fmtVal(val, metricKey)}</span>;
   };
 
-  // ── Strategy groups for select ────────────────────────────────────────────
+  // ── Strategy groups for select ──────────────────
   const strategyGroups = [...new Set(STRATEGIES.map(s => s.group))].map(g => ({
     group: g,
     items: STRATEGIES.filter(s => s.group === g),
+  }));
+
+  const modelGroups = [...new Set(MODELS.map(m => m.group))].map(g => ({
+    group: g,
+    items: MODELS.filter(m => m.group === g),
   }));
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -601,7 +612,7 @@ export default function App() {
               <div className="sidebar-subtitle">Evaluation & Benchmarking</div>
             </div>
           </div>
-          <BackendBadge health={backendHealth} />
+          <BackendBadge health={backendHealth} selectedModel={activeTab === 'chat' ? chatModel : evalModel} />
         </div>
 
         <div className="tabs" style={{ margin: '12px 12px 0' }}>
@@ -615,6 +626,23 @@ export default function App() {
 
         {activeTab === 'chat' && (
           <div className="sidebar-section" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div>
+              <div className="section-label">Model</div>
+              <select
+                className="strategy-select"
+                value={chatModel}
+                onChange={e => setChatModel(e.target.value)}
+              >
+                {modelGroups.map(({ group, items }) => (
+                  <optgroup key={group} label={group}>
+                    {items.map(m => (
+                      <option key={m.id} value={m.id}>{m.label}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+
             <div>
               <div className="section-label">Strategy</div>
               <select
@@ -636,6 +664,24 @@ export default function App() {
 
         {activeTab === 'eval' && (
           <>
+            <div className="sidebar-section">
+              <div className="section-label">Model</div>
+              <select
+                className="strategy-select"
+                value={evalModel}
+                onChange={e => setEvalModel(e.target.value)}
+                disabled={isAnyJobRunning}
+              >
+                {modelGroups.map(({ group, items }) => (
+                  <optgroup key={group} label={group}>
+                    {items.map(m => (
+                      <option key={m.id} value={m.id}>{m.label}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+
             <div className="sidebar-section">
               <div className="section-label">Dataset Difficulty</div>
               <div className="check-list">
@@ -687,10 +733,11 @@ export default function App() {
         )}
 
         <div className="sidebar-footer">
-          {backendHealth?.backend === 'vllm'
-            ? `Inference: vLLM @ ${backendHealth.model?.split('/').slice(-1)[0]}`
-            : 'Inference: OpenAI API'
-          }
+          {(() => {
+            const m = activeTab === 'chat' ? chatModel : evalModel;
+            const entry = MODELS.find(x => x.id === m);
+            return `Inference: ${entry?.group || 'API'} · ${entry?.label || m}`;
+          })()}
         </div>
       </div>
 

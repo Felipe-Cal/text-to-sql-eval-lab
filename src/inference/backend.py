@@ -34,18 +34,22 @@ class InferenceBackend:
     is_vllm: bool
 
 
-def get_completion_backend() -> InferenceBackend:
+def get_completion_backend(model: str | None = None) -> InferenceBackend:
     """
     Return the active completion backend.
 
     Priority:
-      1. vLLM  — when VLLM_API_BASE and VLLM_MODEL are both non-empty.
-      2. Default — DEFAULT_MODEL env var (LiteLLM routes to OpenAI, Anthropic, etc.).
+      1. vLLM  — when model matches VLLM_MODEL and VLLM_API_BASE is set.
+      2. Default — model param or DEFAULT_MODEL env var (LiteLLM routes to OpenAI, Anthropic, etc.).
     """
     vllm_base = os.getenv("VLLM_API_BASE", "").strip()
     vllm_model = os.getenv("VLLM_MODEL", "").strip()
 
-    if vllm_base and vllm_model:
+    # Determine which model is being requested
+    requested_model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
+
+    # If it's specifically the vLLM model and we have a base URL, use vLLM
+    if vllm_base and vllm_model and requested_model == vllm_model:
         return InferenceBackend(
             model_name=vllm_model,
             api_base=vllm_base,
@@ -54,7 +58,7 @@ def get_completion_backend() -> InferenceBackend:
         )
 
     return InferenceBackend(
-        model_name=os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini"),
+        model_name=requested_model,
         api_base=None,
         api_key=None,
         is_vllm=False,
@@ -104,7 +108,14 @@ def build_completion_kwargs(
       - api_key         — passed through if set (some vLLM deployments require a token)
       - extra_body      — disables beam search to enforce greedy decoding at temperature=0
     """
-    kwargs: dict = {"model": model or backend.model_name}
+    effective_model = model or backend.model_name
+
+    # vLLM exposes an OpenAI-compatible API.  LiteLLM requires the "openai/"
+    # prefix to route to a custom base URL correctly.
+    if backend.is_vllm and not effective_model.startswith("openai/"):
+        effective_model = f"openai/{effective_model}"
+
+    kwargs: dict = {"model": effective_model}
 
     if backend.api_base:
         kwargs["api_base"] = backend.api_base
