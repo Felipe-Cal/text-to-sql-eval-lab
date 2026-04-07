@@ -1,345 +1,610 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import './index.css';
 
+const API_BASE = 'http://127.0.0.1:8000';
+
 const STRATEGIES = [
-  { id: 'zero_shot', label: 'Zero Shot (Baseline)' },
-  { id: 'few_shot_static', label: 'Few Shot (Static)' },
-  { id: 'few_shot_dynamic', label: 'Few Shot (Dynamic)' },
-  { id: 'chain_of_thought', label: 'Chain of Thought' },
-  { id: 'rag', label: 'Vector RAG' },
-  { id: 'dspy', label: 'DSPy Optimized' },
-  { id: 'routed', label: 'Smart Router' }
+  { group: 'Standard',  id: 'zero_shot',        label: 'Zero Shot' },
+  { group: 'Standard',  id: 'few_shot_static',   label: 'Few Shot Static' },
+  { group: 'Standard',  id: 'few_shot_dynamic',  label: 'Few Shot Dynamic' },
+  { group: 'Standard',  id: 'chain_of_thought',  label: 'Chain of Thought' },
+  { group: 'RAG',       id: 'rag_dense',         label: 'RAG Dense' },
+  { group: 'RAG',       id: 'rag_sparse',        label: 'RAG Sparse' },
+  { group: 'RAG',       id: 'rag_hybrid',        label: 'RAG Hybrid' },
+  { group: 'Advanced',  id: 'tool_use',          label: 'Tool Use' },
+  { group: 'Advanced',  id: 'dspy',              label: 'DSPy Optimized' },
+  { group: 'Advanced',  id: 'routed',            label: 'Smart Router' },
 ];
 
 const DIFFICULTIES = ['easy', 'medium', 'hard'];
 
-function App() {
-  const [activeTab, setActiveTab] = useState('eval'); // 'chat' or 'eval'
+const TOOL_ICONS = {
+  query_database:        '🗄️',
+  search_knowledge_base: '📚',
+  get_schema:            '🔍',
+};
 
-  // Chat State
-  const [messages, setMessages] = useState([
-    {
-      role: 'ai',
-      text: "Hello! I am your Enterprise Text-to-SQL assistant. I am connected to your DuckDB Sandbox.\n\nAsk me questions like:\n- What is the total revenue per category?\n- Which customers are in the USA?"
-    }
-  ]);
+// ─── Sub-components ──────────────────────────────────────────────────────────
+
+function BackendBadge({ health }) {
+  if (!health) {
+    return (
+      <div className="backend-badge warn">
+        <span className="backend-dot" />
+        Connecting…
+      </div>
+    );
+  }
+  const isVllm = health.backend === 'vllm';
+  const isOk = health.status === 'ok';
+  const label = isVllm
+    ? `vLLM · ${(health.model || '').split('/').pop() || health.model}`
+    : `OpenAI · ${(health.model || '').split('/').pop() || 'default'}`;
+  return (
+    <div className={`backend-badge ${isOk ? 'ok' : 'err'}`}>
+      <span className="backend-dot" />
+      {label}
+      {health.latency_ms != null && (
+        <span style={{ opacity: 0.6, marginLeft: 4 }}>{health.latency_ms}ms</span>
+      )}
+    </div>
+  );
+}
+
+function ToolCallItem({ call }) {
+  const [expanded, setExpanded] = useState(false);
+  const icon = TOOL_ICONS[call.tool] || '🔧';
+  const statusClass = call.pending ? 'pending' : call.success ? 'success' : 'error';
+  const statusLabel = call.pending ? 'Running…' : call.success ? '✓ Done' : '✗ Failed';
+
+  return (
+    <div className={`tool-call-item ${statusClass}`}>
+      <div className="tool-call-header" onClick={() => !call.pending && setExpanded(e => !e)}>
+        <span className="tool-icon">{icon}</span>
+        <span className="tool-name">{call.tool}</span>
+        <span className={`tool-status ${statusClass}`}>{statusLabel}</span>
+        {!call.pending && <span className="expand-icon">{expanded ? '▾' : '▸'}</span>}
+      </div>
+      {expanded && (
+        <div className="tool-call-body">
+          {call.input != null && (
+            <div className="tool-io">
+              <span className="tool-io-label">Input</span>
+              <pre>{typeof call.input === 'string' ? call.input : JSON.stringify(call.input, null, 2)}</pre>
+            </div>
+          )}
+          {call.output != null && (
+            <div className="tool-io">
+              <span className="tool-io-label">Output</span>
+              <pre>{call.output}</pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SqlBlock({ sql, isStreaming }) {
+  const [copied, setCopied] = useState(false);
+  if (!sql && !isStreaming) return null;
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(sql || '');
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
+  };
+
+  return (
+    <div className="sql-block">
+      <div className="sql-block-header">
+        <span className="sql-block-label">SQL</span>
+        {!isStreaming && sql && (
+          <button className={`copy-btn ${copied ? 'copied' : ''}`} onClick={handleCopy}>
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
+        )}
+      </div>
+      <pre className="sql-code">
+        {sql || ''}
+        {isStreaming && <span className="sql-cursor" />}
+      </pre>
+    </div>
+  );
+}
+
+function DataTable({ rows, error }) {
+  if (error) return <p className="ai-error">Query error: {error}</p>;
+  if (!rows || rows.length === 0) return (
+    <p style={{ fontSize: '0.83em', color: 'var(--text-3)', fontStyle: 'italic', marginBottom: 12 }}>
+      No rows returned.
+    </p>
+  );
+  const headers = Object.keys(rows[0]);
+  return (
+    <div className="data-wrap">
+      <table className="data-table">
+        <thead>
+          <tr>{headers.map(h => <th key={h}>{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={i}>
+              {headers.map(h => <td key={h}>{String(row[h] ?? '')}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function MetricsBadges({ metrics, toolCount }) {
+  if (!metrics) return null;
+  return (
+    <div className="metrics-row">
+      {metrics.latency != null && (
+        <span className="badge">{metrics.latency.toFixed(2)}s</span>
+      )}
+      {metrics.cost > 0 && (
+        <span className="badge">${metrics.cost.toFixed(5)}</span>
+      )}
+      {metrics.tokens > 0 && (
+        <span className="badge">{metrics.tokens} tokens</span>
+      )}
+      {metrics.attempts > 1 && (
+        <span className="badge yellow">{metrics.attempts} attempts</span>
+      )}
+      {toolCount > 0 && (
+        <span className="badge blue">{toolCount} tool call{toolCount !== 1 ? 's' : ''}</span>
+      )}
+      {metrics.routedDifficulty && (
+        <span className="badge accent">
+          {metrics.routedDifficulty} · {metrics.routerMethod}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function AiMessage({ msg }) {
+  const { isStreaming, streamingSql, sql, answer, toolEvents, reasoning, retryCount, data, dataError, metrics, text, error } = msg;
+
+  const displaySql = isStreaming ? streamingSql : sql;
+  const toolCount = toolEvents?.length || 0;
+
+  return (
+    <div className="ai-row">
+      <div className="ai-avatar">✦</div>
+      <div className="ai-body">
+        {error && <div className="ai-error">{error}</div>}
+        {text && <div className="ai-text">{text}</div>}
+        {answer && <div className="ai-answer">{answer}</div>}
+        {reasoning && <div className="reasoning-box">{reasoning}</div>}
+        {retryCount > 0 && (
+          <div className="retry-notice">
+            ↺ Retrying after SQL error ({retryCount} attempt{retryCount !== 1 ? 's' : ''})
+          </div>
+        )}
+        {toolEvents?.length > 0 && (
+          <div className="tool-timeline">
+            {toolEvents.map((tc, i) => <ToolCallItem key={i} call={tc} />)}
+          </div>
+        )}
+        {(displaySql || isStreaming) && (
+          <SqlBlock sql={displaySql} isStreaming={isStreaming} />
+        )}
+        {data !== null && data !== undefined && (
+          <DataTable rows={data} error={dataError} />
+        )}
+        {!isStreaming && (
+          <MetricsBadges metrics={metrics} toolCount={toolCount} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── App ─────────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState('chat');
+
+  // ── Chat state
+  const [messages, setMessages] = useState([{
+    role: 'ai',
+    text: 'Hello! I\'m your Text-to-SQL assistant, connected to the e-commerce DuckDB sandbox.\n\nTry asking:\n• "What is total revenue per product category?"\n• "Which customers placed the most orders?"\n• "What is our return rate?" (try Tool Use for policy questions)',
+  }]);
   const [input, setInput] = useState('');
-  const [chatStrategy, setChatStrategy] = useState('dspy');
-  const [isLoading, setIsLoading] = useState(false);
+  const [chatStrategy, setChatStrategy] = useState('few_shot_dynamic');
+  const [isStreaming, setIsStreaming] = useState(false);
   const scrollRef = useRef(null);
+  const inputRef = useRef(null);
+  const abortRef = useRef(null);
 
-  // Eval State
+  // ── Backend health
+  const [backendHealth, setBackendHealth] = useState(null);
+
+  // ── Eval state
   const [selectedDifficulties, setSelectedDifficulties] = useState(['hard']);
-  const [selectedStrategies, setSelectedStrategies] = useState(['rag', 'dspy']);
-  
-  // Dashboard Table State
+  const [selectedStrategies, setSelectedStrategies] = useState(['rag_hybrid', 'few_shot_dynamic']);
   const [expandedRows, setExpandedRows] = useState([]);
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'desc' });
   const activePolls = useRef({});
 
-  // -------------------------------------------------------------
-  // Persistent Cache Logic (Best Practice for browser-based state)
-  // -------------------------------------------------------------
   const [jobs, setJobs] = useState(() => {
-    // Initialize lazily from LocalStorage
-    const saved = localStorage.getItem('sqlEvalJobsCache');
-    if (saved) return JSON.parse(saved);
+    const saved = localStorage.getItem('sqlEvalJobsCache_v2');
+    if (saved) { try { return JSON.parse(saved); } catch { return []; } }
     return [];
   });
 
+  // Persist completed jobs
   useEffect(() => {
-    // Flush to LocalStorage whenever jobs object changes
-    const completedOrFailedJobs = jobs.filter(j => j.status === 'completed' || j.status === 'failed');
-    localStorage.setItem('sqlEvalJobsCache', JSON.stringify(completedOrFailedJobs));
+    const done = jobs.filter(j => ['completed', 'failed'].includes(j.status));
+    localStorage.setItem('sqlEvalJobsCache_v2', JSON.stringify(done));
   }, [jobs]);
 
-  const clearCache = () => {
-    setJobs([]);
-    localStorage.removeItem('sqlEvalJobsCache');
-  };
-  // -------------------------------------------------------------
+  // Fetch backend health on mount
+  useEffect(() => {
+    fetch(`${API_BASE}/health/backend`)
+      .then(r => r.json())
+      .then(setBackendHealth)
+      .catch(() => setBackendHealth({ status: 'unavailable', backend: 'unknown' }));
+  }, []);
 
+  // Auto-scroll
   useEffect(() => {
     if (activeTab === 'chat' && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, activeTab]);
 
-  const toggleStrategy = (id) => {
-    setSelectedStrategies(prev => 
-      prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
-    );
-  };
+  // Helper: update the last (streaming) AI message
+  const updateLast = useCallback((updater) => {
+    setMessages(prev => {
+      if (!prev.length) return prev;
+      const last = prev[prev.length - 1];
+      if (last.role !== 'ai') return prev;
+      return [...prev.slice(0, -1), { ...last, ...updater(last) }];
+    });
+  }, []);
 
-  const toggleDifficulty = (diff) => {
-    setSelectedDifficulties(prev => 
-      prev.includes(diff) ? prev.filter(d => d !== diff) : [...prev, diff]
-    );
-  };
+  // Fetch SQL results after streaming completes
+  const fetchResults = useCallback(async (sql) => {
+    try {
+      const res = await fetch(`${API_BASE}/sql/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql }),
+      });
+      const { data, error } = await res.json();
+      setMessages(prev => {
+        // Find the last AI message that has this SQL
+        for (let i = prev.length - 1; i >= 0; i--) {
+          if (prev[i].role === 'ai' && prev[i].sql === sql) {
+            return prev.map((m, idx) =>
+              idx === i ? { ...m, data: data ?? [], dataError: error } : m
+            );
+          }
+        }
+        return prev;
+      });
+    } catch { /* skip data on network error */ }
+  }, []);
 
   const handleSubmitChat = async (e) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
+    const question = input.trim();
+    if (!question || isStreaming) return;
 
-    const userQuestion = input.trim();
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', text: userQuestion }]);
-    setIsLoading(true);
+    setIsStreaming(true);
+
+    setMessages(prev => [
+      ...prev,
+      { role: 'user', text: question },
+      {
+        role: 'ai', isStreaming: true,
+        streamingSql: '', sql: '', answer: '',
+        toolEvents: [], reasoning: null,
+        retryCount: 0, data: null, dataError: null,
+        metrics: null, text: null, error: null,
+      },
+    ]);
+
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/query', {
+      const resp = await fetch(`${API_BASE}/query/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: userQuestion, strategy: chatStrategy })
+        body: JSON.stringify({ question, strategy: chatStrategy }),
+        signal: ctrl.signal,
       });
-      
-      const data = await response.json();
-      
-      setMessages(prev => [...prev, {
-        role: 'ai',
-        sql: data.sql,
-        reasoning: data.reasoning,
-        data: data.data,
-        metrics: {
-          latency: data.latency,
-          cost: data.cost,
-          tokens: data.completion_tokens + data.prompt_tokens,
-          router: data.routed_difficulty ? `Router selected: ${data.router_method}` : null
+
+      if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
+          try {
+            const ev = JSON.parse(raw);
+            switch (ev.type) {
+              case 'sql_token':
+                updateLast(m => ({ streamingSql: (m.streamingSql || '') + ev.content }));
+                break;
+              case 'tool_call':
+                updateLast(m => ({
+                  toolEvents: [...(m.toolEvents || []), {
+                    tool: ev.tool, input: ev.input,
+                    output: null, success: null, pending: true,
+                  }],
+                }));
+                break;
+              case 'tool_result':
+                updateLast(m => {
+                  const evts = [...(m.toolEvents || [])];
+                  for (let i = evts.length - 1; i >= 0; i--) {
+                    if (evts[i].tool === ev.tool && evts[i].pending) {
+                      evts[i] = { ...evts[i], output: ev.output, success: ev.success, pending: false };
+                      break;
+                    }
+                  }
+                  return { toolEvents: evts };
+                });
+                break;
+              case 'retry':
+                updateLast(m => ({ streamingSql: '', retryCount: (m.retryCount || 0) + 1 }));
+                break;
+              case 'done':
+                updateLast(() => ({
+                  isStreaming: false,
+                  sql: ev.sql || '',
+                  streamingSql: '',
+                  answer: ev.answer || '',
+                  reasoning: ev.reasoning || null,
+                  metrics: {
+                    latency: ev.latency,
+                    cost: ev.cost,
+                    tokens: (ev.prompt_tokens || 0) + (ev.completion_tokens || 0),
+                    attempts: ev.attempts,
+                    routedDifficulty: ev.routed_difficulty,
+                    routerMethod: ev.router_method,
+                  },
+                }));
+                if (ev.sql) fetchResults(ev.sql);
+                break;
+              case 'error':
+                updateLast(() => ({ isStreaming: false, error: ev.message }));
+                break;
+            }
+          } catch { /* skip malformed event */ }
         }
-      }]);
-    } catch (error) {
-      setMessages(prev => [...prev, { role: 'ai', text: `Error connecting to API: ${error.message}` }]);
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        updateLast(() => ({ isStreaming: false, error: err.message }));
+      }
     } finally {
-      setIsLoading(false);
+      setIsStreaming(false);
+      abortRef.current = null;
+      // Ensure streaming flag is cleared even if done event was missed
+      setMessages(prev => {
+        const last = prev[prev.length - 1];
+        if (last?.isStreaming) {
+          return [...prev.slice(0, -1), { ...last, isStreaming: false }];
+        }
+        return prev;
+      });
     }
   };
 
-  const startBatchEval = async () => {
-    if (selectedStrategies.length === 0 || selectedDifficulties.length === 0) return;
-    
-    setExpandedRows(selectedStrategies); // Expand the UI automatically
-    
-    // Matrix of all combinations requested
-    const requestedCombinations = [];
-    selectedStrategies.forEach(strat => {
-       selectedDifficulties.forEach(diff => {
-          requestedCombinations.push({ strat, diff });
-       });
-    });
-
-    // 1. Differentiate between already Cached (completed) vs Missing/Failed
-    const jobsToExecute = [];
-    const jobsToKeep = [...jobs];
-
-    requestedCombinations.forEach(combo => {
-       const existingIndex = jobsToKeep.findIndex(j => j.strategy === combo.strat && j.difficulty === combo.diff);
-       
-       if (existingIndex !== -1 && jobsToKeep[existingIndex].status === 'completed') {
-          // Already have it successfully cached! Do nothing.
-       } else {
-          // It's missing or failed. Add to execute queue.
-          jobsToExecute.push(combo);
-          
-          // Re-initialize state slot (remove old failed state if it existed)
-          if (existingIndex !== -1) {
-             jobsToKeep[existingIndex] = { ...jobsToKeep[existingIndex], status: 'pending', jobId: null, results: null };
-          } else {
-             jobsToKeep.push({ jobId: null, strategy: combo.strat, difficulty: combo.diff, status: 'pending', results: null });
-          }
-       }
-    });
-
-    setJobs(jobsToKeep);
-
-    if (jobsToExecute.length === 0) {
-       // Everything they clicked is already downloaded! Instant UI.
-       return;
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmitChat(e);
     }
-    
-    // 2. Dispatch the Missing Jobs to backend
-    const dispatchedJobs = await Promise.all(jobsToExecute.map(async (combo) => {
+  };
+
+  // ── Eval logic ────────────────────────────────────────────────────────────
+
+  const isAnyJobRunning = jobs.some(j => ['running', 'pending'].includes(j.status));
+
+  const toggleStrategy = id =>
+    setSelectedStrategies(p => p.includes(id) ? p.filter(s => s !== id) : [...p, id]);
+
+  const toggleDifficulty = d =>
+    setSelectedDifficulties(p => p.includes(d) ? p.filter(x => x !== d) : [...p, d]);
+
+  const startBatchEval = async () => {
+    if (!selectedStrategies.length || !selectedDifficulties.length) return;
+    setExpandedRows(selectedStrategies);
+
+    const combos = selectedStrategies.flatMap(s =>
+      selectedDifficulties.map(d => ({ strat: s, diff: d }))
+    );
+
+    const kept = [...jobs];
+    const toRun = [];
+
+    combos.forEach(({ strat, diff }) => {
+      const idx = kept.findIndex(j => j.strategy === strat && j.difficulty === diff);
+      if (idx !== -1 && kept[idx].status === 'completed') return;
+      toRun.push({ strat, diff });
+      if (idx !== -1) kept[idx] = { ...kept[idx], status: 'pending', jobId: null, results: null };
+      else kept.push({ jobId: null, strategy: strat, difficulty: diff, status: 'pending', results: null });
+    });
+
+    setJobs(kept);
+    if (!toRun.length) return;
+
+    const dispatched = await Promise.all(toRun.map(async ({ strat, diff }) => {
       try {
-        const res = await fetch('http://127.0.0.1:8000/evals/run', {
+        const res = await fetch(`${API_BASE}/evals/run`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ strategy: combo.strat, difficulty: combo.diff })
+          body: JSON.stringify({ strategy: strat, difficulty: diff }),
         });
         const data = await res.json();
-        return { strategy: combo.strat, difficulty: combo.diff, jobId: data.job_id, status: 'running' };
-      } catch (e) {
-        return { strategy: combo.strat, difficulty: combo.diff, jobId: null, status: 'failed' };
+        return { strat, diff, jobId: data.job_id, ok: true };
+      } catch {
+        return { strat, diff, jobId: null, ok: false };
       }
     }));
-    
-    // 3. Setup polling listeners
-    setJobs(currentJobs => 
-      currentJobs.map(job => {
-        const dispatch = dispatchedJobs.find(d => d.strategy === job.strategy && d.difficulty === job.difficulty);
-        if (dispatch && dispatch.jobId) {
-           pollJob(dispatch.jobId, job.strategy, job.difficulty);
-           return { ...job, jobId: dispatch.jobId, status: 'running' };
-        }
-        // If it was in the execute queue but dispatch failed, mark failed
-        const wasInExecuteQueue = jobsToExecute.find(d => d.strat === job.strategy && d.diff === job.difficulty);
-        if (wasInExecuteQueue && !dispatch) return { ...job, status: 'failed' };
-        
-        return job; // leave existing cached jobs untouched
-      })
-    );
+
+    setJobs(cur => cur.map(job => {
+      const d = dispatched.find(x => x.strat === job.strategy && x.diff === job.difficulty);
+      if (!d) return job;
+      if (d.ok && d.jobId) {
+        pollJob(d.jobId);
+        return { ...job, jobId: d.jobId, status: 'running' };
+      }
+      return { ...job, status: 'failed' };
+    }));
   };
 
   const pollJob = (jobId) => {
     const id = setInterval(async () => {
       try {
-        const res = await fetch(`http://127.0.0.1:8000/evals/${jobId}`);
+        const res = await fetch(`${API_BASE}/evals/${jobId}`);
         const data = await res.json();
-        
-        if (data.status === 'completed' || data.status === 'failed') {
+        if (['completed', 'failed'].includes(data.status)) {
           clearInterval(id);
           delete activePolls.current[jobId];
-          
-          setJobs(currentJobs => currentJobs.map(job => {
-            if (job.jobId === jobId) {
-               return { 
-                 ...job, 
-                 status: data.status, 
-                 results: data.results?.scores || null 
-               };
-            }
-            return job;
-          }));
+          setJobs(cur => cur.map(j =>
+            j.jobId === jobId
+              ? { ...j, status: data.status, results: data.results?.scores ?? null }
+              : j
+          ));
         }
-      } catch (e) {
+      } catch {
         clearInterval(id);
         delete activePolls.current[jobId];
-        
-        setJobs(currentJobs => currentJobs.map(job => 
-          job.jobId === jobId ? { ...job, status: 'failed' } : job
-        ));
+        setJobs(cur => cur.map(j => j.jobId === jobId ? { ...j, status: 'failed' } : j));
       }
     }, 3000);
-    
     activePolls.current[jobId] = id;
   };
 
-  const renderTable = (rows) => {
-    if (!rows || rows.length === 0) return <p style={{color: '#94a3b8', fontStyle: 'italic'}}>No rows returned.</p>;
-    if (rows.length === 1 && rows[0].error) {
-       return <p style={{color: '#ef4444'}}>DuckDB Error: {rows[0].error}</p>;
-    }
-    
-    const headers = Object.keys(rows[0]);
-    return (
-      <div style={{overflowX: 'auto'}}>
-        <table className="data-table">
-          <thead>
-            <tr>{headers.map(h => <th key={h}>{h}</th>)}</tr>
-          </thead>
-          <tbody>
-             {rows.map((row, i) => (
-              <tr key={i}>
-                 {headers.map(h => <td key={h}>{String(row[h])}</td>)}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    );
+  const clearCache = () => {
+    setJobs([]);
+    localStorage.removeItem('sqlEvalJobsCache_v2');
   };
 
-  const isAnyJobRunning = jobs.some(j => j.status === 'running' || j.status === 'pending');
+  // ── Leaderboard data ──────────────────────────────────────────────────────
 
-  const handleSort = (key) => {
-    setSortConfig(prev => ({
-      key,
-      direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc'
-    }));
+  const getVal = (results, path) => {
+    if (!results) return null;
+    const v = path.split('.').reduce((o, k) => (o ? o[k] : null), results);
+    return typeof v === 'number' ? v : null;
   };
 
-  const sortIcon = (key) => {
-    if (sortConfig.key !== key) return null;
-    return sortConfig.direction === 'asc' ? ' ▴' : ' ▾';
-  };
+  const groupedJobs = STRATEGIES
+    .filter(s => selectedStrategies.includes(s.id))
+    .map(st => {
+      const gJobs = jobs.filter(j => j.strategy === st.id);
+      const done = gJobs.filter(j => j.status === 'completed' && j.results);
+      const running = gJobs.some(j => ['pending', 'running'].includes(j.status));
+      const failed = gJobs.some(j => j.status === 'failed');
+      const status = running ? 'running' : failed ? 'failed' : done.length > 0 ? 'done' : 'pending';
 
-  const groupedJobs = STRATEGIES.filter(s => selectedStrategies.includes(s.id)).map(st => {
-    const gJobs = jobs.filter(j => j.strategy === st.id);
-    
-    const completedJobs = gJobs.filter(j => j.status === 'completed' && j.results);
-    const isRunning = gJobs.some(j => ['pending', 'running'].includes(j.status));
-    const isFailed = gJobs.some(j => j.status === 'failed');
-    const status = isRunning ? 'running' : (isFailed ? 'failed' : (gJobs.length > 0 ? 'completed' : 'empty'));
-    
-    const avgScore = (path) => {
-       if (completedJobs.length === 0) return null;
-       let sum = 0;
-       let count = 0;
-       completedJobs.forEach(job => {
-          const val = path.split('.').reduce((o, i) => o ? o[i] : null, job.results);
-          if (typeof val === 'number') { sum += val; count++; }
-       });
-       return count === 0 ? null : sum / count;
-    };
+      const avg = path => {
+        const vals = done.map(j => getVal(j.results, path)).filter(v => v !== null);
+        return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      };
 
-    return {
-      strategy: st.id,
-      label: st.label,
-      summaryStatus: status,
-      totalJobs: gJobs.length,
-      children: gJobs,
-      metrics: {
-        result_match: avgScore('result_match.accuracy'),
-        semantic_judge: avgScore('semantic_judge.accuracy'),
-        retrieval_recall: avgScore('retrieval_recall.mean'),
-        avg_latency: avgScore('avg_latency.mean'),
-        avg_cost: avgScore('avg_cost.mean')
-      }
-    };
-  }).filter(g => g.totalJobs > 0); // only show groups that have actual jobs cached or running
+      return {
+        id: st.id,
+        label: st.label,
+        group: st.group,
+        status,
+        totalJobs: gJobs.length,
+        children: gJobs,
+        metrics: {
+          result_match:    avg('result_match.accuracy'),
+          semantic_judge:  avg('semantic_judge.accuracy'),
+          retrieval_recall:avg('retrieval_recall.mean'),
+          avg_latency:     avg('avg_latency.mean'),
+          avg_cost:        avg('avg_cost.mean'),
+          avg_attempts:    avg('avg_attempts.mean'),
+          avg_tool_calls:  avg('avg_tool_calls.mean'),
+        },
+      };
+    })
+    .filter(g => g.totalJobs > 0);
+
+  const handleSort = key =>
+    setSortConfig(p => ({ key, direction: p.key === key && p.direction === 'desc' ? 'asc' : 'desc' }));
 
   const sortedGroups = [...groupedJobs].sort((a, b) => {
     if (!sortConfig.key) return 0;
     if (sortConfig.key === 'strategy') {
-       const res = a.label.localeCompare(b.label);
-       return sortConfig.direction === 'asc' ? res : -res;
+      const r = a.label.localeCompare(b.label);
+      return sortConfig.direction === 'asc' ? r : -r;
     }
-    if (sortConfig.key === 'status') {
-       const res = a.summaryStatus.localeCompare(b.summaryStatus);
-       return sortConfig.direction === 'asc' ? res : -res;
-    }
-    
-    const valA = a.metrics[sortConfig.key];
-    const valB = b.metrics[sortConfig.key];
-    
-    if (valA === null && valB !== null) return 1;
-    if (valA !== null && valB === null) return -1;
-    if (valA === null && valB === null) return 0;
-    
-    return sortConfig.direction === 'asc' ? valA - valB : valB - valA;
+    const va = a.metrics[sortConfig.key], vb = b.metrics[sortConfig.key];
+    if (va === null && vb === null) return 0;
+    if (va === null) return 1;
+    if (vb === null) return -1;
+    return sortConfig.direction === 'asc' ? va - vb : vb - va;
   });
 
-  const formatVal = (val, key) => {
-     if (val === null || val === undefined) return '-';
-     if (key.includes('accuracy') || key.includes('recall')) return (val * 100).toFixed(1) + '%';
-     if (key.includes('latency')) return val.toFixed(2) + 's';
-     if (key.includes('cost')) return '$' + val.toFixed(4);
-     return val;
+  const sortIcon = key => sortConfig.key !== key ? '' : sortConfig.direction === 'asc' ? ' ▴' : ' ▾';
+
+  const fmtVal = (val, key) => {
+    if (val === null || val === undefined) return '—';
+    if (key.includes('accuracy') || key.includes('recall')) return (val * 100).toFixed(1) + '%';
+    if (key.includes('latency')) return val.toFixed(2) + 's';
+    if (key.includes('cost')) return '$' + val.toFixed(5);
+    if (key.includes('attempts') || key.includes('tool')) return val.toFixed(1);
+    return String(val);
   };
 
-  const RawValueRenderer = ({ status, val, keyPath }) => {
-    if (status === 'running' || status === 'pending') return <span style={{color: '#94a3b8'}}>...</span>;
-    if (status === 'failed') return <span style={{color: '#ef4444'}}>Error</span>;
-    return <span>{formatVal(val, keyPath)}</span>;
+  const Cell = ({ status, val, metricKey }) => {
+    if (['running', 'pending'].includes(status)) return <span style={{ color: 'var(--text-3)' }}>…</span>;
+    if (status === 'failed') return <span style={{ color: 'var(--red)', fontSize: '0.8em' }}>Error</span>;
+    return <span>{fmtVal(val, metricKey)}</span>;
   };
+
+  // ── Strategy groups for select ────────────────────────────────────────────
+  const strategyGroups = [...new Set(STRATEGIES.map(s => s.group))].map(g => ({
+    group: g,
+    items: STRATEGIES.filter(s => s.group === g),
+  }));
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="app-container">
+
+      {/* ── Sidebar ── */}
       <div className="sidebar">
-        <div>
-          <h2>Evaluation Lab</h2>
-          <p style={{fontSize: '0.85em', color: 'var(--text-muted)'}}>Enterprise Text-to-SQL</p>
+        <div className="sidebar-header">
+          <div className="sidebar-logo">
+            <div className="sidebar-logo-icon">⚡</div>
+            <div>
+              <div className="sidebar-title">Text-to-SQL Lab</div>
+              <div className="sidebar-subtitle">Evaluation & Benchmarking</div>
+            </div>
+          </div>
+          <BackendBadge health={backendHealth} />
         </div>
 
-        <div className="tabs" style={{marginTop: '20px'}}>
+        <div className="tabs" style={{ margin: '12px 12px 0' }}>
           <div className={`tab ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>
             Chat
           </div>
@@ -347,228 +612,226 @@ function App() {
             Leaderboard
           </div>
         </div>
-        
+
         {activeTab === 'chat' && (
-          <div className="control-group">
-            <label>Prompting Strategy</label>
-            <select value={chatStrategy} onChange={e => setChatStrategy(e.target.value)}>
-              {STRATEGIES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-            </select>
+          <div className="sidebar-section" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div>
+              <div className="section-label">Strategy</div>
+              <select
+                className="strategy-select"
+                value={chatStrategy}
+                onChange={e => setChatStrategy(e.target.value)}
+              >
+                {strategyGroups.map(({ group, items }) => (
+                  <optgroup key={group} label={group}>
+                    {items.map(s => (
+                      <option key={s.id} value={s.id}>{s.label}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
           </div>
         )}
 
         {activeTab === 'eval' && (
           <>
-            <div className="control-group">
-              <label>Dataset Difficulty</label>
-              <div style={{display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '12px'}}>
+            <div className="sidebar-section">
+              <div className="section-label">Dataset Difficulty</div>
+              <div className="check-list">
                 {DIFFICULTIES.map(d => (
-                  <label key={d} className="checkbox-label" style={{display: 'flex', alignItems: 'center', gap: '8px', textTransform: 'none', color: 'var(--text-main)', cursor: 'pointer', fontSize: '0.9em', margin: 0}}>
-                    <input 
-                      type="checkbox" 
-                      style={{accentColor: 'var(--accent)', transform: 'scale(1.2)'}}
+                  <label key={d} className={`check-item ${isAnyJobRunning ? 'disabled' : ''}`}>
+                    <input
+                      type="checkbox"
                       checked={selectedDifficulties.includes(d)}
                       onChange={() => toggleDifficulty(d)}
-                      disabled={isAnyJobRunning}
                     />
-                    {d.toUpperCase()}
+                    {d.charAt(0).toUpperCase() + d.slice(1)}
                   </label>
                 ))}
               </div>
             </div>
-            
-            <div className="control-group">
-              <label>Compare Strategies</label>
-              <div style={{display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '12px'}}>
+
+            <div className="sidebar-section" style={{ flex: 1 }}>
+              <div className="section-label">Compare Strategies</div>
+              <div className="check-list">
                 {STRATEGIES.map(s => (
-                  <label key={s.id} className="checkbox-label" style={{display: 'flex', alignItems: 'center', gap: '8px', textTransform: 'none', color: 'var(--text-main)', cursor: 'pointer', fontSize: '0.9em', margin: 0}}>
-                    <input 
-                      type="checkbox" 
-                      style={{accentColor: 'var(--accent)', transform: 'scale(1.2)'}}
+                  <label key={s.id} className={`check-item ${isAnyJobRunning ? 'disabled' : ''}`}>
+                    <input
+                      type="checkbox"
                       checked={selectedStrategies.includes(s.id)}
                       onChange={() => toggleStrategy(s.id)}
-                      disabled={isAnyJobRunning}
                     />
                     {s.label}
                   </label>
                 ))}
               </div>
             </div>
-            
-            <div style={{display: 'flex', gap: '10px', marginTop: '10px'}}>
-               <button 
-                 className="btn-primary" 
-                 onClick={startBatchEval} 
-                 disabled={isAnyJobRunning || selectedStrategies.length === 0 || selectedDifficulties.length === 0} 
-                 style={{flex: 1}}>
-                 {isAnyJobRunning ? 'Running...' : 'Run Selected'}
-               </button>
-               <button 
-                 onClick={clearCache} 
-                 style={{background: 'rgba(239, 68, 68, 0.2)', color: '#ef4444', border: 'none', borderRadius: '16px', padding: '0 16px', cursor: 'pointer'}}
-                 title="Clear Cache">
-                 🗑️
-               </button>
+
+            <div className="sidebar-section">
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  className="btn-primary"
+                  style={{ flex: 1 }}
+                  onClick={startBatchEval}
+                  disabled={isAnyJobRunning || !selectedStrategies.length || !selectedDifficulties.length}
+                >
+                  {isAnyJobRunning ? 'Running…' : 'Run Evals'}
+                </button>
+                <button className="btn-danger" onClick={clearCache} title="Clear results cache">
+                  🗑
+                </button>
+              </div>
             </div>
           </>
         )}
 
-        <div style={{marginTop: 'auto', fontSize: '0.8em', color: 'var(--text-muted)'}}>
-          Connected to local DuckDB and DSPy backend.
+        <div className="sidebar-footer">
+          {backendHealth?.backend === 'vllm'
+            ? `Inference: vLLM @ ${backendHealth.model?.split('/').slice(-1)[0]}`
+            : 'Inference: OpenAI API'
+          }
         </div>
       </div>
-      
+
+      {/* ── Main area ── */}
       {activeTab === 'chat' ? (
+
         <div className="chat-container">
           <div className="messages" ref={scrollRef}>
             {messages.map((msg, i) => (
-              <div key={i} className={`message ${msg.role === 'user' ? 'user-msg' : 'ai-msg'}`}>
-                {msg.role === 'user' ? (
-                  <div>{msg.text}</div>
-                ) : (
-                  <div className="ai-content">
-                    {msg.text && <p style={{whiteSpace: 'pre-wrap'}}>{msg.text}</p>}
-                    
-                    {msg.reasoning && (
-                      <div className="reasoning-box">
-                        {msg.reasoning}
-                      </div>
-                    )}
-                    
-                    {msg.sql && (
-                      <div className="sql-box">
-                        {msg.sql}
-                      </div>
-                    )}
-                    
-                    {msg.data !== undefined && renderTable(msg.data)}
-                    
-                    {msg.metrics && (
-                      <div className="metrics" style={{flexWrap: 'wrap'}}>
-                        <span className="metric-badge">{msg.metrics.latency.toFixed(2)}s Latency</span>
-                        <span className="metric-badge">${msg.metrics.cost.toFixed(5)}</span>
-                        {msg.metrics.tokens > 0 && <span className="metric-badge">{msg.metrics.tokens} Tokens</span>}
-                        {msg.metrics.router && <span className="metric-badge" style={{borderColor: '#818cf8', color: '#818cf8'}}>{msg.metrics.router}</span>}
-                      </div>
-                    )}
-                  </div>
-                )}
+              <div key={i} className={`message-row ${msg.role === 'user' ? 'user-row' : ''}`}>
+                {msg.role === 'user'
+                  ? <div className="user-bubble">{msg.text}</div>
+                  : <AiMessage msg={msg} />
+                }
               </div>
             ))}
-            {isLoading && (
-              <div className="message ai-msg">
-                  <span style={{color: '#94a3b8', fontStyle: 'italic'}}>Generating SQL...</span>
+            {isStreaming && (
+              <div className="loading-row">
+                <div className="loading-dots">
+                  <span /><span /><span />
+                </div>
               </div>
             )}
           </div>
-          
+
           <div className="input-area">
-            <form className="input-box" onSubmit={handleSubmitChat}>
-              <input 
-                type="text" 
-                placeholder="Ask a question about the data..." 
+            <form className="input-form" onSubmit={handleSubmitChat}>
+              <textarea
+                ref={inputRef}
+                className="input-field"
+                placeholder="Ask about the data…"
                 value={input}
                 onChange={e => setInput(e.target.value)}
-                disabled={isLoading}
+                onKeyDown={handleKeyDown}
+                disabled={isStreaming}
+                rows={1}
               />
-              <button type="submit" disabled={isLoading || !input.trim()}>
-                Send
+              <button className="send-btn" type="submit" disabled={isStreaming || !input.trim()}>
+                ↑
               </button>
             </form>
           </div>
         </div>
+
       ) : (
+
         <div className="eval-dashboard">
-          <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px'}}>
-             <h1 style={{margin: 0}}>Evaluation Leaderboard</h1>
-             {isAnyJobRunning && <div className="spinner" style={{margin: 0, width: '24px', height: '24px', borderWidth: '3px'}}></div>}
+          <div className="eval-header">
+            <h1 className="eval-title">Evaluation Leaderboard</h1>
+            {isAnyJobRunning && <div className="spinner" />}
           </div>
-          <p style={{color: 'var(--text-muted)', marginBottom: '10px'}}>
-            Select multiple strategies and difficulties on the left. Click column headers to sort the matrix. 
-            Cached results load instantly. Click the trash can to force a re-run.
+          <p className="eval-description">
+            Select strategies and difficulties on the left. Cached results reload instantly. Click column headers to sort.
           </p>
 
-          {jobs.length > 0 ? (
-            <div style={{overflowX: 'auto', marginTop: '20px'}}>
-              <table className="data-table" style={{width: '100%', minWidth: '900px', fontSize: '1em'}}>
+          {sortedGroups.length > 0 ? (
+            <div className="leaderboard-wrap">
+              <table className="leaderboard">
                 <thead>
-                  <tr style={{cursor: 'pointer'}}>
-                    <th onClick={() => handleSort('strategy')}>Strategy {sortIcon('strategy')}</th>
-                    <th onClick={() => handleSort('status')}>Status {sortIcon('status')}</th>
-                    <th onClick={() => handleSort('result_match')}>Result Match {sortIcon('result_match')}</th>
-                    <th onClick={() => handleSort('semantic_judge')}>Semantic Score {sortIcon('semantic_judge')}</th>
-                    <th onClick={() => handleSort('retrieval_recall')}>RAG Recall {sortIcon('retrieval_recall')}</th>
-                    <th onClick={() => handleSort('avg_latency')}>Latency {sortIcon('avg_latency')}</th>
-                    <th onClick={() => handleSort('avg_cost')}>Cost {sortIcon('avg_cost')}</th>
+                  <tr>
+                    <th onClick={() => handleSort('strategy')}>Strategy{sortIcon('strategy')}</th>
+                    <th>Status</th>
+                    <th onClick={() => handleSort('result_match')}>Result Match{sortIcon('result_match')}</th>
+                    <th onClick={() => handleSort('semantic_judge')}>Semantic{sortIcon('semantic_judge')}</th>
+                    <th onClick={() => handleSort('retrieval_recall')}>RAG Recall{sortIcon('retrieval_recall')}</th>
+                    <th onClick={() => handleSort('avg_attempts')}>Attempts{sortIcon('avg_attempts')}</th>
+                    <th onClick={() => handleSort('avg_tool_calls')}>Tool Calls{sortIcon('avg_tool_calls')}</th>
+                    <th onClick={() => handleSort('avg_latency')}>Latency{sortIcon('avg_latency')}</th>
+                    <th onClick={() => handleSort('avg_cost')}>Cost{sortIcon('avg_cost')}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedGroups.map((group) => {
-                     const isExpanded = expandedRows.includes(group.strategy);
-                     
-                     return (
-                      <React.Fragment key={group.strategy}>
-                        {/* Parent Aggregate Row */}
-                        <tr 
-                          onClick={() => setExpandedRows(prev => prev.includes(group.strategy) ? prev.filter(r => r !== group.strategy) : [...prev, group.strategy])}
-                          style={{
-                            background: group.summaryStatus === 'running' ? 'rgba(59, 130, 246, 0.05)' : 'rgba(255, 255, 255, 0.03)',
-                            cursor: 'pointer',
-                            borderBottom: isExpanded ? 'none' : ''
-                          }}>
-                          <td style={{fontWeight: '600', paddingLeft: '20px'}}>
-                            <span style={{display:'inline-block', width:'20px', color: 'var(--text-muted)'}}>{isExpanded ? '▾' : '▸'}</span> 
-                            {group.label} {group.totalJobs > 1 && <span style={{fontSize: '0.8em', color: '#94a3b8', marginLeft: '6px'}}>({group.totalJobs} sets)</span>}
+                  {sortedGroups.map(group => {
+                    const isExpanded = expandedRows.includes(group.id);
+                    return (
+                      <React.Fragment key={group.id}>
+                        <tr
+                          className="group-row"
+                          onClick={() => setExpandedRows(p =>
+                            p.includes(group.id) ? p.filter(r => r !== group.id) : [...p, group.id]
+                          )}
+                        >
+                          <td style={{ fontWeight: 600, paddingLeft: 20 }}>
+                            <span style={{ color: 'var(--text-3)', marginRight: 8 }}>
+                              {isExpanded ? '▾' : '▸'}
+                            </span>
+                            {group.label}
+                            {group.totalJobs > 1 && (
+                              <span style={{ fontSize: '0.78em', color: 'var(--text-3)', marginLeft: 6 }}>
+                                ({group.totalJobs} sets)
+                              </span>
+                            )}
                           </td>
                           <td>
-                             {group.summaryStatus === 'running' ? <span style={{color: '#60a5fa'}}>Running</span> : 
-                              group.summaryStatus === 'failed' ? <span style={{color: '#ef4444'}}>Failed</span> : 
-                              <span style={{color: '#4ade80'}}>Done</span>}
+                            <span className={`status-dot ${group.status}`}>
+                              {group.status === 'done' ? 'Done' : group.status === 'running' ? 'Running' : group.status === 'failed' ? 'Failed' : 'Pending'}
+                            </span>
                           </td>
-                          <td style={{fontWeight: '500'}}><RawValueRenderer status={group.summaryStatus} val={group.metrics.result_match} keyPath="result_match.accuracy" /></td>
-                          <td style={{fontWeight: '500'}}><RawValueRenderer status={group.summaryStatus} val={group.metrics.semantic_judge} keyPath="semantic_judge.accuracy" /></td>
-                          <td style={{fontWeight: '500'}}><RawValueRenderer status={group.summaryStatus} val={group.metrics.retrieval_recall} keyPath="retrieval_recall.mean" /></td>
-                          <td style={{fontWeight: '500'}}><RawValueRenderer status={group.summaryStatus} val={group.metrics.avg_latency} keyPath="avg_latency.mean" /></td>
-                          <td style={{fontWeight: '500'}}><RawValueRenderer status={group.summaryStatus} val={group.metrics.avg_cost} keyPath="avg_cost.mean" /></td>
+                          <td><Cell status={group.status} val={group.metrics.result_match}    metricKey="accuracy" /></td>
+                          <td><Cell status={group.status} val={group.metrics.semantic_judge}  metricKey="accuracy" /></td>
+                          <td><Cell status={group.status} val={group.metrics.retrieval_recall} metricKey="recall" /></td>
+                          <td><Cell status={group.status} val={group.metrics.avg_attempts}    metricKey="attempts" /></td>
+                          <td><Cell status={group.status} val={group.metrics.avg_tool_calls}  metricKey="tool" /></td>
+                          <td><Cell status={group.status} val={group.metrics.avg_latency}     metricKey="latency" /></td>
+                          <td><Cell status={group.status} val={group.metrics.avg_cost}        metricKey="cost" /></td>
                         </tr>
 
-                        {/* Child Detail Rows */}
-                        {isExpanded && group.children.map(job => {
-                           const valPath = (path) => job.results ? path.split('.').reduce((o, i) => o ? o[i] : null, job.results) : null;
-                           
-                           return (
-                             <tr key={`${job.strategy}-${job.difficulty}`} style={{background: 'rgba(0,0,0,0.1)'}}>
-                                <td style={{paddingLeft: '50px', color: '#94a3b8', fontSize: '0.9em', textTransform: 'capitalize'}}>↳ Dataset: {job.difficulty}</td>
-                                <td style={{fontSize: '0.9em'}}>
-                                   {job.status === 'running' || job.status === 'pending' ? <span style={{color: '#60a5fa'}}>Queued</span> : 
-                                    job.status === 'failed' ? <span style={{color: '#ef4444'}}>Failed</span> : 
-                                    <span style={{color: '#4ade80'}}>Done</span>}
-                                </td>
-                                <td><RawValueRenderer status={job.status} val={valPath('result_match.accuracy')} keyPath="result_match.accuracy" /></td>
-                                <td><RawValueRenderer status={job.status} val={valPath('semantic_judge.accuracy')} keyPath="semantic_judge.accuracy" /></td>
-                                <td><RawValueRenderer status={job.status} val={valPath('retrieval_recall.mean')} keyPath="retrieval_recall.mean" /></td>
-                                <td><RawValueRenderer status={job.status} val={valPath('avg_latency.mean')} keyPath="avg_latency.mean" /></td>
-                                <td><RawValueRenderer status={job.status} val={valPath('avg_cost.mean')} keyPath="avg_cost.mean" /></td>
-                             </tr>
-                           );
-                        })}
+                        {isExpanded && group.children.map(job => (
+                          <tr key={`${job.strategy}-${job.difficulty}`} className="child-row">
+                            <td style={{ paddingLeft: 48, color: 'var(--text-3)', fontSize: '0.85em' }}>
+                              ↳ {job.difficulty}
+                            </td>
+                            <td>
+                              <span className={`status-dot ${job.status === 'completed' ? 'done' : job.status}`}>
+                                {job.status === 'completed' ? 'Done' : job.status === 'running' ? 'Running' : job.status === 'failed' ? 'Failed' : 'Pending'}
+                              </span>
+                            </td>
+                            <td><Cell status={job.status} val={getVal(job.results, 'result_match.accuracy')}    metricKey="accuracy" /></td>
+                            <td><Cell status={job.status} val={getVal(job.results, 'semantic_judge.accuracy')}  metricKey="accuracy" /></td>
+                            <td><Cell status={job.status} val={getVal(job.results, 'retrieval_recall.mean')}    metricKey="recall" /></td>
+                            <td><Cell status={job.status} val={getVal(job.results, 'avg_attempts.mean')}        metricKey="attempts" /></td>
+                            <td><Cell status={job.status} val={getVal(job.results, 'avg_tool_calls.mean')}      metricKey="tool" /></td>
+                            <td><Cell status={job.status} val={getVal(job.results, 'avg_latency.mean')}         metricKey="latency" /></td>
+                            <td><Cell status={job.status} val={getVal(job.results, 'avg_cost.mean')}            metricKey="cost" /></td>
+                          </tr>
+                        ))}
                       </React.Fragment>
-                     );
+                    );
                   })}
                 </tbody>
               </table>
             </div>
           ) : (
-            <div style={{textAlign: 'center', padding: '60px', border: '1px dashed var(--border-color)', borderRadius: '12px', marginTop: '40px'}}>
-              <h3 style={{color: 'var(--text-muted)'}}>No Benchmark Data</h3>
-              <p style={{color: '#475569', fontSize: '0.9em', marginTop: '8px'}}>Select combinations on the left and run a batch.</p>
+            <div className="empty-state">
+              <h3>No benchmark data yet</h3>
+              <p>Select strategies and difficulties on the left, then click Run Evals.</p>
             </div>
           )}
-
         </div>
+
       )}
     </div>
   );
 }
-
-export default App;

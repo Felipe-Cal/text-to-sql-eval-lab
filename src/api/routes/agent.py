@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from src.agent.agent import PromptStrategy, agenerate_sql, agenerate_sql_stream
-from src.utils.db import get_connection
+from src.utils.db import get_connection, get_schema_string
 
 router = APIRouter()
 
@@ -113,3 +113,20 @@ async def query_stream(request: QueryRequest):
             yield f"data: {_json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+class ExecuteSqlRequest(BaseModel):
+    sql: str
+
+
+@router.post("/sql/execute")
+async def execute_sql(request: ExecuteSqlRequest):
+    """Execute a SQL query directly and return result rows. Used by the UI after streaming."""
+    con = get_connection()
+    try:
+        df = con.execute(request.sql).fetchdf().fillna("")
+        return {"data": df.to_dict(orient="records"), "error": None}
+    except Exception as e:
+        return {"data": [], "error": str(e)}
+    finally:
+        con.close()
