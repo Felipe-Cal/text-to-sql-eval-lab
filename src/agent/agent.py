@@ -23,6 +23,8 @@ Supports prompt strategies via the PromptStrategy enum:
                        questions (via KB search) in a single interface.
 """
 
+import asyncio
+import json
 import os
 import re
 import time
@@ -30,6 +32,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TypedDict, Annotated, Sequence
 import operator
+
+from src.inference.backend import (
+    get_completion_backend,
+    build_completion_kwargs,
+    supports_json_schema,
+)
 
 import litellm
 from dotenv import load_dotenv
@@ -109,6 +117,41 @@ COT_USER_PROMPT_TEMPLATE = """{few_shot_block}Schema:
 {schema}
 
 Question: {question}"""
+
+
+# ---------------------------------------------------------------------------
+# JSON schema definitions for constrained decoding (vLLM / OpenAI structured outputs)
+# ---------------------------------------------------------------------------
+
+SQL_JSON_SCHEMA = {
+    "name": "sql_response",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "sql": {"type": "string", "description": "The SQL query that answers the question."},
+        },
+        "required": ["sql"],
+        "additionalProperties": False,
+    },
+}
+
+SQL_COT_JSON_SCHEMA = {
+    "name": "sql_cot_response",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "reasoning": {
+                "type": "string",
+                "description": "Step-by-step reasoning identifying tables, joins, filters, and aggregations needed.",
+            },
+            "sql": {"type": "string", "description": "The SQL query that answers the question."},
+        },
+        "required": ["reasoning", "sql"],
+        "additionalProperties": False,
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -418,17 +461,30 @@ def generate_sql(
     system_prompt = COT_SYSTEM_PROMPT if is_cot else SYSTEM_PROMPT
     user_template = COT_USER_PROMPT_TEMPLATE if is_cot else USER_PROMPT_TEMPLATE
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": user_template.format(
-                few_shot_block=few_shot_block,
-                schema=schema,
-                question=question,
-            ),
-        },
-    ]
+    backend = get_completion_backend()
+
+    if backend.is_vllm and not is_cot:
+        # KV-cache-friendly structure for vLLM: the [system, schema] prefix is identical
+        # across all requests so vLLM's prefix caching reuses those KV entries, saving
+        # ~800 tokens of computation per query on the 50-table DWH schema.
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Database schema:\n{schema}"},
+            {"role": "assistant", "content": "Schema noted. Ready to write SQL."},
+            {"role": "user", "content": f"{few_shot_block}Question: {question}\n\nSQL:"},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": user_template.format(
+                    few_shot_block=few_shot_block,
+                    schema=schema,
+                    question=question,
+                ),
+            },
+        ]
 
     start_time = time.time()
     
@@ -483,15 +539,26 @@ def generate_sql(
             prompt_tokens: int
             completion_tokens: int
             cost: float
+            json_schema_mode: bool
 
         def generate_node(state: AgentState):
-            response = litellm.completion(
+            # backend is captured from the enclosing generate_sql scope
+            completion_kwargs = build_completion_kwargs(
+                backend,
                 model=state["model"],
                 messages=state["messages"],
                 temperature=0,
                 max_tokens=1024 if state["is_cot"] else 512,
             )
-            
+            if state["json_schema_mode"]:
+                schema_def = SQL_COT_JSON_SCHEMA if state["is_cot"] else SQL_JSON_SCHEMA
+                completion_kwargs["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": schema_def,
+                }
+
+            response = litellm.completion(**completion_kwargs)
+
             p_tokens = response.usage.prompt_tokens or 0
             c_tokens = response.usage.completion_tokens or 0
             call_cost = 0.0
@@ -500,10 +567,20 @@ def generate_sql(
                 if c: call_cost = float(c)
             except Exception:
                 pass
-                
+
             raw = response.choices[0].message.content or ""
-            extracted_sql = extract_sql(raw)
-            rsn = _extract_reasoning(raw) if state["is_cot"] else None
+
+            if state["json_schema_mode"]:
+                try:
+                    parsed = json.loads(raw)
+                    extracted_sql = parsed.get("sql", "").strip()
+                    rsn = parsed.get("reasoning") if state["is_cot"] else None
+                except (json.JSONDecodeError, AttributeError):
+                    extracted_sql = extract_sql(raw)
+                    rsn = _extract_reasoning(raw) if state["is_cot"] else None
+            else:
+                extracted_sql = extract_sql(raw)
+                rsn = _extract_reasoning(raw) if state["is_cot"] else None
             
             new_messages = state["messages"].copy()
             new_messages.append({"role": "assistant", "content": raw})
@@ -572,7 +649,8 @@ def generate_sql(
             "error": None,
             "prompt_tokens": 0,
             "completion_tokens": 0,
-            "cost": 0.0
+            "cost": 0.0,
+            "json_schema_mode": supports_json_schema(backend),
         }
         
         final_state = app.invoke(initial_state)
@@ -623,6 +701,492 @@ def generate_sql(
         routed_difficulty=routed_difficulty,
         router_method=router_method,
     )
+
+
+# ---------------------------------------------------------------------------
+# Async tool-use loop
+# ---------------------------------------------------------------------------
+
+async def _arun_tool_use_loop(
+    question: str,
+    model: str,
+    max_iterations: int = 10,
+) -> tuple[str, str, list[dict], int, int, float, int]:
+    """
+    Async variant of _run_tool_use_loop using litellm.acompletion.
+    Enables true async I/O so vLLM's continuous batcher can overlap requests.
+    """
+    from src.agent.tools import TOOL_SCHEMAS, execute_tool
+
+    messages = [
+        {"role": "system", "content": TOOL_USE_SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+
+    backend = get_completion_backend()
+    tool_calls_log: list[dict] = []
+    last_sql: str = ""
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_cost = 0.0
+    iterations = 0
+
+    for iteration in range(max_iterations):
+        iterations = iteration + 1
+
+        completion_kwargs = build_completion_kwargs(
+            backend,
+            model=model,
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
+            temperature=0,
+        )
+        response = await litellm.acompletion(**completion_kwargs)
+
+        total_prompt_tokens += response.usage.prompt_tokens
+        total_completion_tokens += response.usage.completion_tokens
+        try:
+            cost = litellm.completion_cost(completion_response=response)
+            if cost:
+                total_cost += cost
+        except Exception:
+            pass
+
+        message = response.choices[0].message
+        finish_reason = response.choices[0].finish_reason
+        messages.append(message)
+
+        if finish_reason != "tool_calls" or not message.tool_calls:
+            answer = message.content or ""
+            return answer, last_sql, tool_calls_log, total_prompt_tokens, total_completion_tokens, total_cost, iterations
+
+        for tc in message.tool_calls:
+            name = tc.function.name
+            args = tc.function.arguments
+
+            # execute_tool is sync (DuckDB + KB lookup) — run in thread to avoid blocking
+            result_str, success, error = await asyncio.to_thread(execute_tool, name, args)
+
+            if name == "query_database":
+                try:
+                    parsed_args = json.loads(args) if isinstance(args, str) else args
+                    last_sql = parsed_args.get("sql", "")
+                except Exception:
+                    pass
+
+            tool_calls_log.append({
+                "iteration": iteration + 1,
+                "tool": name,
+                "arguments": args,
+                "result": result_str[:500],
+                "success": success,
+                "error": error,
+            })
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result_str,
+            })
+
+    return (
+        "Max tool iterations reached without a final answer.",
+        last_sql,
+        tool_calls_log,
+        total_prompt_tokens,
+        total_completion_tokens,
+        total_cost,
+        iterations,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Async agent — drop-in replacement for generate_sql in async contexts
+# ---------------------------------------------------------------------------
+
+@observe(name="text-to-sql-async")
+async def agenerate_sql(
+    question: str,
+    model: str | None = None,
+    schema: str | None = None,
+    strategy: PromptStrategy = PromptStrategy.ZERO_SHOT,
+    max_retries: int = 3,
+) -> AgentResult:
+    """
+    Async variant of generate_sql. Uses litellm.acompletion for true async I/O,
+    enabling vLLM's continuous batcher to overlap multiple concurrent requests.
+
+    Drop-in replacement for generate_sql in FastAPI routes and async callers.
+    DSPy strategy falls back to a thread since DSPy is synchronous.
+    """
+    model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
+    strategy = PromptStrategy(strategy) if isinstance(strategy, str) else strategy
+
+    routed_difficulty: str | None = None
+    router_method: str | None = None
+    if strategy == PromptStrategy.ROUTED:
+        from src.agent.router import route
+        decision = route(question)
+        model = decision.model
+        strategy = PromptStrategy(decision.strategy)
+        routed_difficulty = decision.difficulty
+        router_method = decision.method
+
+    if strategy == PromptStrategy.TOOL_USE:
+        start_time = time.time()
+        answer, sql, tool_calls_log, prompt_tokens, completion_tokens, cost, iterations = \
+            await _arun_tool_use_loop(question, model)
+        latency = time.time() - start_time
+
+        lf = get_client()
+        lf.update_current_span(
+            input=question,
+            output=answer,
+            metadata={
+                "model": model,
+                "strategy": strategy.value,
+                "tool_calls": tool_calls_log,
+                "iterations": iterations,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost": cost,
+                "latency": latency,
+            },
+        )
+        trace_id = lf.get_current_trace_id()
+
+        return AgentResult(
+            question=question,
+            sql=sql,
+            answer=answer,
+            tool_calls=tool_calls_log,
+            model=model,
+            strategy=strategy.value,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            trace_id=trace_id,
+            attempts=iterations,
+            cost=cost,
+            latency=latency,
+        )
+
+    # DSPy is synchronous — run in a thread to avoid blocking the event loop
+    if strategy == PromptStrategy.DSPY:
+        return await asyncio.to_thread(
+            generate_sql, question, model, schema, strategy, max_retries
+        )
+
+    is_cot = strategy == PromptStrategy.CHAIN_OF_THOUGHT
+
+    if strategy in (PromptStrategy.RAG, PromptStrategy.RAG_DENSE, PromptStrategy.RAG_SPARSE, PromptStrategy.RAG_HYBRID):
+        from src.agent.schema_retriever import retrieve_schema
+        retrieval_type = "hybrid"
+        if strategy == PromptStrategy.RAG_DENSE:
+            retrieval_type = "dense"
+        elif strategy == PromptStrategy.RAG_SPARSE:
+            retrieval_type = "sparse"
+        elif strategy == PromptStrategy.RAG:
+            retrieval_type = "dense"
+        schema_local, retrieved_tables = retrieve_schema(question, top_k=5, retrieval_type=retrieval_type)
+        schema = schema or schema_local
+    else:
+        schema = schema or get_schema_string()
+        retrieved_tables = []
+
+    if strategy == PromptStrategy.FEW_SHOT_STATIC:
+        examples = get_static_examples()
+    elif strategy == PromptStrategy.FEW_SHOT_DYNAMIC:
+        examples = get_dynamic_examples(question)
+    else:
+        examples = []
+
+    few_shot_block = _build_few_shot_block(examples)
+    system_prompt = COT_SYSTEM_PROMPT if is_cot else SYSTEM_PROMPT
+    user_template = COT_USER_PROMPT_TEMPLATE if is_cot else USER_PROMPT_TEMPLATE
+
+    backend = get_completion_backend()
+
+    if backend.is_vllm and not is_cot:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Database schema:\n{schema}"},
+            {"role": "assistant", "content": "Schema noted. Ready to write SQL."},
+            {"role": "user", "content": f"{few_shot_block}Question: {question}\n\nSQL:"},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": user_template.format(
+                    few_shot_block=few_shot_block,
+                    schema=schema,
+                    question=question,
+                ),
+            },
+        ]
+
+    start_time = time.time()
+    json_schema_mode = supports_json_schema(backend)
+
+    class AgentState(TypedDict):
+        messages: list[dict]
+        model: str
+        is_cot: bool
+        max_retries: int
+        attempt: int
+        sql: str
+        raw_output: str
+        reasoning: str | None
+        error: str | None
+        prompt_tokens: int
+        completion_tokens: int
+        cost: float
+        json_schema_mode: bool
+
+    async def generate_node(state: AgentState):
+        completion_kwargs = build_completion_kwargs(
+            backend,
+            model=state["model"],
+            messages=state["messages"],
+            temperature=0,
+            max_tokens=1024 if state["is_cot"] else 512,
+        )
+        if state["json_schema_mode"]:
+            schema_def = SQL_COT_JSON_SCHEMA if state["is_cot"] else SQL_JSON_SCHEMA
+            completion_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": schema_def,
+            }
+
+        response = await litellm.acompletion(**completion_kwargs)
+
+        p_tokens = response.usage.prompt_tokens or 0
+        c_tokens = response.usage.completion_tokens or 0
+        call_cost = 0.0
+        try:
+            c = litellm.completion_cost(completion_response=response)
+            if c:
+                call_cost = float(c)
+        except Exception:
+            pass
+
+        raw = response.choices[0].message.content or ""
+
+        if state["json_schema_mode"]:
+            try:
+                parsed = json.loads(raw)
+                extracted_sql = parsed.get("sql", "").strip()
+                rsn = parsed.get("reasoning") if state["is_cot"] else None
+            except (json.JSONDecodeError, AttributeError):
+                extracted_sql = extract_sql(raw)
+                rsn = _extract_reasoning(raw) if state["is_cot"] else None
+        else:
+            extracted_sql = extract_sql(raw)
+            rsn = _extract_reasoning(raw) if state["is_cot"] else None
+
+        new_messages = state["messages"].copy()
+        new_messages.append({"role": "assistant", "content": raw})
+
+        return {
+            "messages": new_messages,
+            "sql": extracted_sql,
+            "raw_output": raw,
+            "reasoning": rsn,
+            "attempt": state["attempt"] + 1,
+            "prompt_tokens": state["prompt_tokens"] + p_tokens,
+            "completion_tokens": state["completion_tokens"] + c_tokens,
+            "cost": state["cost"] + call_cost,
+        }
+
+    def execute_node(state: AgentState):
+        current_sql = state["sql"]
+        if not current_sql:
+            error_msg = "You didn't output any valid SQL query. Please provide a SQL query."
+            new_msgs = state["messages"].copy()
+            new_msgs.append({"role": "user", "content": error_msg})
+            return {"error": error_msg, "messages": new_msgs}
+
+        try:
+            execute_query(current_sql)
+            return {"error": None}
+        except Exception as e:
+            error_msg = f"The SQL query resulted in an error when executed in DuckDB:\n{str(e)}\n\nPlease fix the query and try again."
+            new_msgs = state["messages"].copy()
+            new_msgs.append({"role": "user", "content": error_msg})
+            return {"error": error_msg, "messages": new_msgs}
+
+    def route_after_execute(state: AgentState):
+        if not state["error"]:
+            return END
+        if state["attempt"] >= state["max_retries"]:
+            return END
+        return "generate_node"
+
+    workflow = StateGraph(AgentState)
+    workflow.add_node("generate_node", generate_node)
+    workflow.add_node("execute_node", execute_node)
+    workflow.set_entry_point("generate_node")
+    workflow.add_edge("generate_node", "execute_node")
+    workflow.add_conditional_edges(
+        "execute_node",
+        route_after_execute,
+        {"generate_node": "generate_node", END: END},
+    )
+
+    app = workflow.compile()
+
+    initial_state = {
+        "messages": messages,
+        "model": model,
+        "is_cot": is_cot,
+        "max_retries": max_retries,
+        "attempt": 0,
+        "sql": "",
+        "raw_output": "",
+        "reasoning": None,
+        "error": None,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost": 0.0,
+        "json_schema_mode": json_schema_mode,
+    }
+
+    final_state = await app.ainvoke(initial_state)
+
+    total_prompt_tokens = final_state["prompt_tokens"]
+    total_completion_tokens = final_state["completion_tokens"]
+    total_cost = final_state["cost"]
+    sql = final_state["sql"]
+    reasoning = final_state["reasoning"]
+    attempt = final_state["attempt"] - 1
+    latency = time.time() - start_time
+
+    lf = get_client()
+    lf.update_current_span(
+        input=question,
+        output=sql,
+        metadata={
+            "model": model,
+            "strategy": strategy.value,
+            "reasoning": reasoning,
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "cost": total_cost,
+            "latency": latency,
+            "attempts": attempt + 1,
+            "retrieved_tables": retrieved_tables,
+            "routed_difficulty": routed_difficulty,
+            "router_method": router_method,
+        },
+    )
+    trace_id = lf.get_current_trace_id()
+
+    return AgentResult(
+        question=question,
+        sql=sql,
+        model=model,
+        strategy=strategy.value,
+        reasoning=reasoning,
+        prompt_tokens=total_prompt_tokens,
+        completion_tokens=total_completion_tokens,
+        trace_id=trace_id,
+        attempts=attempt + 1,
+        cost=total_cost,
+        latency=latency,
+        retrieved_tables=retrieved_tables,
+        routed_difficulty=routed_difficulty,
+        router_method=router_method,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Streaming async generator
+# ---------------------------------------------------------------------------
+
+async def agenerate_sql_stream(
+    question: str,
+    model: str | None = None,
+    schema: str | None = None,
+    strategy: PromptStrategy = PromptStrategy.ZERO_SHOT,
+):
+    """
+    Async generator that streams SQL tokens as they are produced by the LLM.
+
+    Yields raw token strings. Concatenating all chunks gives the complete SQL.
+    tool_use, dspy, and routed strategies are not streamable — they fall back
+    to yielding the completed SQL as a single chunk.
+    """
+    strategy = PromptStrategy(strategy) if isinstance(strategy, str) else strategy
+
+    # Non-streamable strategies: complete fully and yield once
+    if strategy in (PromptStrategy.TOOL_USE, PromptStrategy.DSPY, PromptStrategy.ROUTED):
+        result = await agenerate_sql(question, model, schema, strategy)
+        yield result.sql
+        return
+
+    model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
+    schema = schema or get_schema_string()
+    is_cot = strategy == PromptStrategy.CHAIN_OF_THOUGHT
+
+    if strategy in (PromptStrategy.RAG, PromptStrategy.RAG_DENSE, PromptStrategy.RAG_SPARSE, PromptStrategy.RAG_HYBRID):
+        from src.agent.schema_retriever import retrieve_schema
+        if strategy in (PromptStrategy.RAG, PromptStrategy.RAG_DENSE):
+            retrieval_type = "dense"
+        elif strategy == PromptStrategy.RAG_SPARSE:
+            retrieval_type = "sparse"
+        else:
+            retrieval_type = "hybrid"
+        schema, _ = retrieve_schema(question, top_k=5, retrieval_type=retrieval_type)
+
+    if strategy == PromptStrategy.FEW_SHOT_STATIC:
+        examples = get_static_examples()
+    elif strategy == PromptStrategy.FEW_SHOT_DYNAMIC:
+        examples = get_dynamic_examples(question)
+    else:
+        examples = []
+
+    few_shot_block = _build_few_shot_block(examples)
+    system_prompt = COT_SYSTEM_PROMPT if is_cot else SYSTEM_PROMPT
+    user_template = COT_USER_PROMPT_TEMPLATE if is_cot else USER_PROMPT_TEMPLATE
+
+    backend = get_completion_backend()
+
+    if backend.is_vllm and not is_cot:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Database schema:\n{schema}"},
+            {"role": "assistant", "content": "Schema noted. Ready to write SQL."},
+            {"role": "user", "content": f"{few_shot_block}Question: {question}\n\nSQL:"},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": user_template.format(
+                    few_shot_block=few_shot_block,
+                    schema=schema,
+                    question=question,
+                ),
+            },
+        ]
+
+    completion_kwargs = build_completion_kwargs(
+        backend,
+        model=model,
+        messages=messages,
+        temperature=0,
+        max_tokens=1024 if is_cot else 512,
+        stream=True,
+    )
+
+    response = await litellm.acompletion(**completion_kwargs)
+    async for chunk in response:
+        delta = chunk.choices[0].delta.content or ""
+        if delta:
+            yield delta
 
 
 if __name__ == "__main__":

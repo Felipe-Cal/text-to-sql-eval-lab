@@ -323,21 +323,51 @@ def semantic_judge(judge_model: str | None = None) -> Scorer:
             expected_result=expected_result_str,
         )
 
-        # Call the judge LLM with Instructor for structured output
-        client = instructor.from_litellm(litellm.completion)
-        try:
-            verdict_obj = client.chat.completions.create(
+        # Call the judge LLM — use native JSON schema constrained decoding when supported
+        # (vLLM guided decoding / OpenAI structured outputs), fall back to Instructor otherwise.
+        from src.inference.backend import get_completion_backend, build_completion_kwargs, supports_json_schema
+
+        backend = get_completion_backend()
+        judge_messages = [
+            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+
+        if supports_json_schema(backend, model=_judge_model):
+            judge_kwargs = build_completion_kwargs(
+                backend,
                 model=_judge_model,
-                messages=[
-                    {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
+                messages=judge_messages,
                 temperature=0,
                 max_tokens=256,
-                response_model=VerdictData,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "verdict",
+                        "strict": True,
+                        "schema": VerdictData.model_json_schema(),
+                    },
+                },
             )
-        except Exception as e:
-            return Score(value=0, explanation=f"Judge call failed: {e}")
+            try:
+                response = litellm.completion(**judge_kwargs)
+                raw_json = response.choices[0].message.content or "{}"
+                data = json.loads(raw_json)
+                verdict_obj = VerdictData(**data)
+            except Exception as e:
+                return Score(value=0, explanation=f"Judge call failed: {e}")
+        else:
+            client = instructor.from_litellm(litellm.completion)
+            try:
+                verdict_obj = client.chat.completions.create(
+                    model=_judge_model,
+                    messages=judge_messages,
+                    temperature=0,
+                    max_tokens=256,
+                    response_model=VerdictData,
+                )
+            except Exception as e:
+                return Score(value=0, explanation=f"Judge call failed: {e}")
 
         verdict = verdict_obj.verdict
         reasoning = verdict_obj.reasoning
