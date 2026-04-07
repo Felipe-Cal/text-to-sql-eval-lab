@@ -1102,6 +1102,122 @@ async def agenerate_sql(
 
 
 # ---------------------------------------------------------------------------
+# Streaming tool-use loop
+# ---------------------------------------------------------------------------
+
+async def _arun_tool_use_loop_stream(
+    question: str,
+    model: str,
+    max_iterations: int = 10,
+):
+    """
+    Async generator variant of _arun_tool_use_loop.
+
+    Yields structured event dicts as each tool call happens:
+      {"type": "tool_call",   "tool": name, "input": parsed_args}
+      {"type": "tool_result", "tool": name, "output": result_str, "success": bool}
+      {"type": "done", "sql": ..., "answer": ..., "prompt_tokens": ...,
+       "completion_tokens": ..., "cost": ..., "attempts": ...}
+    """
+    from src.agent.tools import TOOL_SCHEMAS, execute_tool
+
+    messages = [
+        {"role": "system", "content": TOOL_USE_SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+
+    backend = get_completion_backend()
+    tool_calls_log: list[dict] = []
+    last_sql: str = ""
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_cost = 0.0
+
+    for iteration in range(max_iterations):
+        completion_kwargs = build_completion_kwargs(
+            backend,
+            model=model,
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
+            temperature=0,
+        )
+        response = await litellm.acompletion(**completion_kwargs)
+
+        total_prompt_tokens += response.usage.prompt_tokens
+        total_completion_tokens += response.usage.completion_tokens
+        try:
+            cost = litellm.completion_cost(completion_response=response)
+            if cost:
+                total_cost += cost
+        except Exception:
+            pass
+
+        message = response.choices[0].message
+        finish_reason = response.choices[0].finish_reason
+        messages.append(message)
+
+        if finish_reason != "tool_calls" or not message.tool_calls:
+            answer = message.content or ""
+            yield {
+                "type": "done",
+                "sql": last_sql,
+                "answer": answer,
+                "tool_calls": tool_calls_log,
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "cost": total_cost,
+                "attempts": iteration + 1,
+            }
+            return
+
+        for tc in message.tool_calls:
+            name = tc.function.name
+            args = tc.function.arguments
+
+            try:
+                parsed_args = json.loads(args) if isinstance(args, str) else args
+            except Exception:
+                parsed_args = {}
+
+            yield {"type": "tool_call", "tool": name, "input": parsed_args}
+
+            result_str, success, error = await asyncio.to_thread(execute_tool, name, args)
+
+            if name == "query_database":
+                last_sql = parsed_args.get("sql", "")
+
+            log_entry = {
+                "iteration": iteration + 1,
+                "tool": name,
+                "arguments": args,
+                "result": result_str[:500],
+                "success": success,
+                "error": error,
+            }
+            tool_calls_log.append(log_entry)
+
+            yield {"type": "tool_result", "tool": name, "output": result_str[:500], "success": success}
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result_str,
+            })
+
+    yield {
+        "type": "done",
+        "sql": last_sql,
+        "answer": "Max tool iterations reached without a final answer.",
+        "tool_calls": tool_calls_log,
+        "prompt_tokens": total_prompt_tokens,
+        "completion_tokens": total_completion_tokens,
+        "cost": total_cost,
+        "attempts": max_iterations,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Streaming async generator
 # ---------------------------------------------------------------------------
 
@@ -1110,35 +1226,83 @@ async def agenerate_sql_stream(
     model: str | None = None,
     schema: str | None = None,
     strategy: PromptStrategy = PromptStrategy.ZERO_SHOT,
+    max_retries: int = 3,
 ):
     """
-    Async generator that streams SQL tokens as they are produced by the LLM.
+    Async generator that streams structured SSE events as the agent works.
 
-    Yields raw token strings. Concatenating all chunks gives the complete SQL.
-    tool_use, dspy, and routed strategies are not streamable — they fall back
-    to yielding the completed SQL as a single chunk.
+    Every yielded value is a dict — the route serializes it to JSON for the
+    client.  Event types:
+
+      {"type": "start",        "strategy": "...", "model": "..."}
+      {"type": "sql_token",    "content": "SELECT "}          — one per LLM chunk
+      {"type": "tool_call",    "tool": "...", "input": {...}}
+      {"type": "tool_result",  "tool": "...", "output": "...", "success": true}
+      {"type": "retry",        "attempt": 2, "error": "column not found"}
+      {"type": "done",         "sql": "...", "cost": 0.001, "latency": 2.3,
+                               "attempts": 1, "prompt_tokens": 80,
+                               "completion_tokens": 40}
+      {"type": "error",        "message": "..."}
+
+    tool_use emits tool_call / tool_result events as each invocation happens.
+    dspy and routed are not token-streamable — they emit start then done.
+    All other strategies stream sql_token events, with retry events on SQL
+    errors (up to max_retries).
     """
     strategy = PromptStrategy(strategy) if isinstance(strategy, str) else strategy
+    model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
+    start_time = time.time()
 
-    # Non-streamable strategies: complete fully and yield once
-    if strategy in (PromptStrategy.TOOL_USE, PromptStrategy.DSPY, PromptStrategy.ROUTED):
-        result = await agenerate_sql(question, model, schema, strategy)
-        yield result.sql
+    # ------------------------------------------------------------------ routed
+    routed_difficulty: str | None = None
+    router_method: str | None = None
+    if strategy == PromptStrategy.ROUTED:
+        from src.agent.router import route
+        decision = route(question)
+        model = decision.model
+        strategy = PromptStrategy(decision.strategy)
+        routed_difficulty = decision.difficulty
+        router_method = decision.method
+
+    yield {"type": "start", "strategy": strategy.value, "model": model}
+
+    # ---------------------------------------------------------------- tool_use
+    if strategy == PromptStrategy.TOOL_USE:
+        async for event in _arun_tool_use_loop_stream(question, model):
+            if event["type"] == "done":
+                event["latency"] = time.time() - start_time
+            yield event
         return
 
-    model = model or os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
-    schema = schema or get_schema_string()
-    is_cot = strategy == PromptStrategy.CHAIN_OF_THOUGHT
+    # ------------------------------------------------------------------- dspy
+    if strategy == PromptStrategy.DSPY:
+        try:
+            result = await asyncio.to_thread(generate_sql, question, model, schema, strategy, max_retries)
+            yield {
+                "type": "done",
+                "sql": result.sql,
+                "cost": result.cost,
+                "latency": time.time() - start_time,
+                "attempts": result.attempts,
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+            }
+        except Exception as exc:
+            yield {"type": "error", "message": str(exc)}
+        return
 
+    # ------------------------------------------------- streamable strategies
     if strategy in (PromptStrategy.RAG, PromptStrategy.RAG_DENSE, PromptStrategy.RAG_SPARSE, PromptStrategy.RAG_HYBRID):
         from src.agent.schema_retriever import retrieve_schema
-        if strategy in (PromptStrategy.RAG, PromptStrategy.RAG_DENSE):
-            retrieval_type = "dense"
-        elif strategy == PromptStrategy.RAG_SPARSE:
+        if strategy == PromptStrategy.RAG_SPARSE:
             retrieval_type = "sparse"
-        else:
+        elif strategy == PromptStrategy.RAG_HYBRID:
             retrieval_type = "hybrid"
+        else:
+            retrieval_type = "dense"
         schema, _ = retrieve_schema(question, top_k=5, retrieval_type=retrieval_type)
+    else:
+        schema = schema or get_schema_string()
 
     if strategy == PromptStrategy.FEW_SHOT_STATIC:
         examples = get_static_examples()
@@ -1147,21 +1311,21 @@ async def agenerate_sql_stream(
     else:
         examples = []
 
+    is_cot = strategy == PromptStrategy.CHAIN_OF_THOUGHT
     few_shot_block = _build_few_shot_block(examples)
     system_prompt = COT_SYSTEM_PROMPT if is_cot else SYSTEM_PROMPT
     user_template = COT_USER_PROMPT_TEMPLATE if is_cot else USER_PROMPT_TEMPLATE
-
     backend = get_completion_backend()
 
     if backend.is_vllm and not is_cot:
-        messages = [
+        base_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Database schema:\n{schema}"},
             {"role": "assistant", "content": "Schema noted. Ready to write SQL."},
             {"role": "user", "content": f"{few_shot_block}Question: {question}\n\nSQL:"},
         ]
     else:
-        messages = [
+        base_messages = [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
@@ -1173,20 +1337,70 @@ async def agenerate_sql_stream(
             },
         ]
 
-    completion_kwargs = build_completion_kwargs(
-        backend,
-        model=model,
-        messages=messages,
-        temperature=0,
-        max_tokens=1024 if is_cot else 512,
-        stream=True,
-    )
+    messages = base_messages
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_cost = 0.0
 
-    response = await litellm.acompletion(**completion_kwargs)
-    async for chunk in response:
-        delta = chunk.choices[0].delta.content or ""
-        if delta:
-            yield delta
+    for attempt in range(1, max_retries + 2):  # +2 so first attempt is 1
+        completion_kwargs = build_completion_kwargs(
+            backend,
+            model=model,
+            messages=messages,
+            temperature=0,
+            max_tokens=1024 if is_cot else 512,
+            stream=True,
+        )
+
+        raw_output = ""
+        try:
+            response = await litellm.acompletion(**completion_kwargs)
+            async for chunk in response:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    raw_output += delta
+                    yield {"type": "sql_token", "content": delta}
+                # accumulate usage from streaming chunks when available
+                if hasattr(chunk, "usage") and chunk.usage:
+                    total_prompt_tokens += getattr(chunk.usage, "prompt_tokens", 0) or 0
+                    total_completion_tokens += getattr(chunk.usage, "completion_tokens", 0) or 0
+        except Exception as exc:
+            yield {"type": "error", "message": str(exc)}
+            return
+
+        sql = extract_sql(raw_output)
+        messages = messages + [{"role": "assistant", "content": raw_output}]
+
+        # Check execution
+        try:
+            execute_query(sql)
+            # Success — emit done and exit
+            yield {
+                "type": "done",
+                "sql": sql,
+                "cost": total_cost,
+                "latency": time.time() - start_time,
+                "attempts": attempt,
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+            }
+            return
+        except Exception as exec_err:
+            if attempt > max_retries:
+                # Exhausted retries — return best-effort SQL
+                yield {
+                    "type": "done",
+                    "sql": sql,
+                    "cost": total_cost,
+                    "latency": time.time() - start_time,
+                    "attempts": attempt,
+                    "prompt_tokens": total_prompt_tokens,
+                    "completion_tokens": total_completion_tokens,
+                }
+                return
+            error_msg = f"The SQL query resulted in an error when executed in DuckDB:\n{exec_err}\n\nPlease fix the query and try again."
+            yield {"type": "retry", "attempt": attempt + 1, "error": str(exec_err)}
+            messages = messages + [{"role": "user", "content": error_msg}]
 
 
 if __name__ == "__main__":

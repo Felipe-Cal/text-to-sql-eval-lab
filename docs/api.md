@@ -16,6 +16,7 @@ The server starts at `http://localhost:8000`. Visit `http://localhost:8000/docs`
 |---|---|---|
 | `GET` | `/health` | Health check — returns `{"status": "ok"}` |
 | `POST` | `/query` | Run the text-to-SQL agent on a question |
+| `POST` | `/query/stream` | Same as `/query` but streams progress as SSE events |
 | `POST` | `/evals/run` | Start an eval run in the background; returns a `job_id` immediately (202 Accepted) |
 | `GET` | `/evals/{job_id}` | Poll an eval job's status and retrieve results when complete |
 
@@ -115,6 +116,103 @@ Notice the agent's natural `get_schema → query_database → search_knowledge_b
 
 ---
 
+## `POST /query/stream` — stream agent progress
+
+Same request body as `/query`. Returns a `text/event-stream` response where each line is an SSE event. Events arrive in real time as the LLM generates tokens, tools are called, and retries happen — so a frontend can show a live typing indicator, tool call logs, and error recovery without waiting for the full response.
+
+**Event format:**
+
+Every event is `data: <JSON>\n\n`. The JSON object always has a `"type"` field:
+
+| Event type | Fields | When it fires |
+|---|---|---|
+| `start` | `strategy`, `model` | Always first — confirms which strategy and model are running |
+| `sql_token` | `content` | Once per LLM output chunk for token-streamable strategies (zero_shot, few_shot_*, chain_of_thought, rag_*) |
+| `tool_call` | `tool`, `input` | `tool_use` only — fired before each tool execution |
+| `tool_result` | `tool`, `output`, `success` | `tool_use` only — fired after each tool returns |
+| `retry` | `attempt`, `error` | When the generated SQL fails execution and the agent retries |
+| `done` | `sql`, `cost`, `latency`, `attempts`, `prompt_tokens`, `completion_tokens` | Always last — contains the final SQL and full metadata |
+| `error` | `message` | If an unrecoverable exception occurs |
+
+**Example — zero_shot (token streaming):**
+
+```
+data: {"type": "start", "strategy": "zero_shot", "model": "openai/gpt-4o-mini"}
+
+data: {"type": "sql_token", "content": "SELECT"}
+data: {"type": "sql_token", "content": " COUNT"}
+data: {"type": "sql_token", "content": "(*)"}
+data: {"type": "sql_token", "content": " FROM customers"}
+
+data: {"type": "done", "sql": "SELECT COUNT(*) FROM customers", "cost": 0.00004,
+       "latency": 0.94, "attempts": 1, "prompt_tokens": 310, "completion_tokens": 8}
+```
+
+**Example — tool_use (tool call events):**
+
+```
+data: {"type": "start", "strategy": "tool_use", "model": "openai/gpt-4o-mini"}
+
+data: {"type": "tool_call", "tool": "get_schema", "input": {"table_name": "orders"}}
+data: {"type": "tool_result", "tool": "get_schema", "output": "orders(id, customer_id, order_date, status)", "success": true}
+
+data: {"type": "tool_call", "tool": "query_database", "input": {"sql": "SELECT COUNT(*) FROM orders WHERE status = 'cancelled'"}}
+data: {"type": "tool_result", "tool": "query_database", "output": "[{\"count_star()\": 2}]", "success": true}
+
+data: {"type": "done", "sql": "SELECT COUNT(*) FROM orders WHERE status = 'cancelled'",
+       "cost": 0.00012, "latency": 3.1, "attempts": 2, "prompt_tokens": 580, "completion_tokens": 62}
+```
+
+**Example — retry (SQL error recovered):**
+
+```
+data: {"type": "start", "strategy": "zero_shot", "model": "openai/gpt-4o-mini"}
+
+data: {"type": "sql_token", "content": "SELECT total FROM ordrs"}
+
+data: {"type": "retry", "attempt": 2, "error": "Table with name ordrs does not exist!"}
+
+data: {"type": "sql_token", "content": "SELECT total FROM orders"}
+
+data: {"type": "done", "sql": "SELECT total FROM orders", "cost": 0.00008,
+       "latency": 2.4, "attempts": 2, "prompt_tokens": 420, "completion_tokens": 16}
+```
+
+**Consuming the stream in JavaScript:**
+
+```javascript
+const response = await fetch('/query/stream', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ question: 'How many customers are there?', strategy: 'zero_shot' }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  for (const line of decoder.decode(value).split('\n')) {
+    if (!line.startsWith('data: ')) continue;
+    const event = JSON.parse(line.slice(6));
+    if (event.type === 'sql_token') process.stdout.write(event.content);
+    if (event.type === 'done') console.log('\nFinal SQL:', event.sql);
+  }
+}
+```
+
+**Strategy compatibility:**
+
+| Strategy | sql_token events | tool_call/tool_result | Notes |
+|---|---|---|---|
+| `zero_shot`, `few_shot_*`, `chain_of_thought`, `rag_*` | ✅ | ❌ | Full token streaming |
+| `tool_use` | ❌ | ✅ | Tool events stream in real time; no raw SQL tokens |
+| `dspy` | ❌ | ❌ | Completes fully, emits start + done only |
+| `routed` | Depends | Depends | Resolves to a real strategy first, then that strategy's events stream |
+
+---
+
 ## `POST /evals/run` — start an eval job
 
 Eval runs take 1–3 minutes (LLM calls + judge scoring for 15 questions). This endpoint returns immediately with a `job_id` and runs the evaluation in a background thread. Poll `/evals/{job_id}` to check status.
@@ -203,6 +301,7 @@ Eval runs take 1–3 minutes (LLM calls + judge scoring for 15 questions). This 
 ## Design notes
 
 - **`/query` is non-blocking** — the LiteLLM call runs in a thread pool via `asyncio.to_thread`. FastAPI's async event loop is never blocked waiting for LLM responses.
+- **`/query/stream` uses structured SSE** — `agenerate_sql_stream` is an async generator that yields event dicts; the route is a thin serializer. All strategies emit a `start` event first and a `done` event last, so clients don't need to special-case any strategy. The retry loop is built directly into the streaming path — if the generated SQL fails execution, the agent emits a `retry` event, appends the error to the conversation, and streams a corrected attempt (up to `max_retries=3`). Token usage in streaming responses may be 0 for some providers that don't include usage in stream chunks.
 - **`/evals/run` is fire-and-forget** — the eval job runs in a `BackgroundTask` thread; you poll for results. A full 15-question run with judge scoring takes 1–3 minutes.
 - **In-memory job store** — eval jobs are stored in a Python dict keyed by UUID. Fine for local use. For production, swap with Redis or a database so jobs survive server restarts.
 - **CORS** — all origins are allowed (`*`). Suitable for local development; restrict in production.

@@ -78,12 +78,16 @@ Key `.env` variables:
 |---|---|
 | `OPENAI_API_KEY` | OpenAI API key |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
-| `DEFAULT_MODEL` | LiteLLM model string (e.g. `openai/gpt-4o-mini`) |
+| `GEMINI_API_KEY` | Google Gemini API key — get one at aistudio.google.com/apikey (optional) |
+| `DEFAULT_MODEL` | LiteLLM model string (e.g. `openai/gpt-4o-mini`, `gemini/gemini-2.0-flash`) |
 | `DATABASE_PATH` | Path to DuckDB file |
 | `JUDGE_MODEL` | Model used by the semantic_judge scorer |
 | `EMBEDDING_MODEL` | Model used for few_shot_dynamic and RAG dense strategies |
 | `HARD_MODEL` | Escalation model for hard questions in the router (optional) |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Langfuse observability (optional) |
+| `VLLM_API_BASE` | vLLM inference server URL — routes all completions there when set (optional) |
+| `VLLM_MODEL` | Model name served by vLLM (e.g. `meta-llama/Meta-Llama-3.1-8B-Instruct`) |
+| `VLLM_EMBEDDING_MODEL` | Embedding model served by vLLM (optional) |
 
 The database is seeded automatically on first run. To reseed manually: `python src/utils/db.py`.
 
@@ -114,6 +118,7 @@ pytest
 
 | Topic | Doc |
 |---|---|
+| **Evaluation pipeline** (scorers, metrics, DeepEval, how to run and interpret results) | [docs/evaluation.md](docs/evaluation.md) |
 | All 9 prompt strategies (zero_shot → tool_use), RAG, LangGraph, DeepEval | [docs/strategies.md](docs/strategies.md) |
 | Tool-use agent (agentic SQL + KB search, policy/hybrid questions) | [docs/tool-use.md](docs/tool-use.md) |
 | RAG infrastructure (chunking, vector stores, Qdrant hybrid search, benchmarks) | [docs/rag.md](docs/rag.md) |
